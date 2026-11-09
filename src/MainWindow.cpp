@@ -16,6 +16,10 @@
 #include <filesystem>
 #include <sstream>
 #include <shlwapi.h>
+#include <winioctl.h>
+#include <dbt.h>
+#include <PortableDeviceApi.h>
+#include <PortableDevice.h>
 #pragma comment(lib, "shlwapi.lib")
 
 namespace fs = std::filesystem;
@@ -213,6 +217,13 @@ INT_PTR MainWindow::HandleMainMessage(HWND hWnd, UINT message, WPARAM wParam, LP
             LPNMHDR lpnmhdr = (LPNMHDR)lParam;
             if (lpnmhdr->code == TCN_SELCHANGE && lpnmhdr->idFrom == IDC_TAB_MAIN) {
                 OnTabChanged();
+            }
+            break;
+        }
+
+        case WM_DEVICECHANGE: {
+            if (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE || wParam == DBT_DEVNODES_CHANGED) {
+                RefreshAllDriveCombos();
             }
             break;
         }
@@ -1124,8 +1135,21 @@ INT_PTR MainWindow::HandleShredderMessage(HWND hWnd, UINT message, WPARAM wParam
         } else if (wmId == IDC_BTN_WIPE_FREESPACE) {
             HWND hCombo = GetDlgItem(hWnd, IDC_CMB_WIPE_DRIVE);
             int drvSel = ComboBox_GetCurSel(hCombo);
-            wchar_t driveStr[128];
+            if (drvSel == CB_ERR) return (INT_PTR)TRUE;
+
+            wchar_t driveStr[256];
             ComboBox_GetLBText(hCombo, drvSel, driveStr);
+            std::wstring rawDrive(driveStr);
+            std::wstring driveKey = ExtractDrivePath(rawDrive);
+
+            if (IsMtpDevice(driveKey) || IsMtpDevice(rawDrive)) {
+                std::wstring msg = L"스마트폰(휴대폰) 빈 공간 삭제 안내:\n\n"
+                    L"MTP 프로토콜로 연결된 스마트폰은 디스크 블록 단위의 직접 쓰기가 제한되어 있어 '빈 공간 삭제(Wipe)' 기능이 지원되지 않습니다.\n\n"
+                    L"[대안 안내]\n"
+                    L"스마트폰 내의 특정 파일 또는 폴더를 영구적으로 파쇄하시려면, 상단의 [파일 파쇄] 또는 [폴더 파쇄] 버튼을 클릭한 후 Windows 탐색기 대화상자에서 해당 스마트폰의 파일/폴더를 직접 선택하여 파쇄해 주시기 바랍니다.";
+                MessageBoxW(hWnd, msg.c_str(), L"스마트폰(MTP) 파쇄 안내", MB_OK | MB_ICONINFORMATION);
+                return (INT_PTR)TRUE;
+            }
             
             bool mftOnly = (IsDlgButtonChecked(hWnd, IDC_CHK_MFT_ONLY) == BST_CHECKED);
             WipeMode mode = mftOnly ? WipeMode::MftOnly : WipeMode::FullWipe;
@@ -1139,8 +1163,7 @@ INT_PTR MainWindow::HandleShredderMessage(HWND hWnd, UINT message, WPARAM wParam
             ShowWindow(GetDlgItem(hWnd, IDC_BTN_SHRED_STOP), SW_SHOW);
             SetDlgItemTextW(hWnd, IDC_BTN_SHRED_PAUSE, L"일시정지");
 
-            std::wstring driveW(driveStr);
-            std::thread([this, hWnd, driveW, mode]() {
+            std::thread([this, hWnd, driveKey, mode]() {
                 auto cancelCheck = [this]() -> bool {
                     while (m_pauseShred) {
                         if (m_cancelShred) return true;
@@ -1152,7 +1175,7 @@ INT_PTR MainWindow::HandleShredderMessage(HWND hWnd, UINT message, WPARAM wParam
                 auto startTime = std::chrono::steady_clock::now();
                 std::vector<std::wstring> drivesToWipe;
                 
-                if (driveW.find(L"All Drives") != std::wstring::npos) {
+                if (driveKey == L"ALL") {
                     DWORD drives = GetLogicalDrives();
                     for (int i = 0; i < 26; ++i) {
                         if (drives & (1 << i)) {
@@ -1161,7 +1184,7 @@ INT_PTR MainWindow::HandleShredderMessage(HWND hWnd, UINT message, WPARAM wParam
                         }
                     }
                 } else {
-                    drivesToWipe.push_back(driveW);
+                    drivesToWipe.push_back(driveKey);
                 }
                 
                 int totalDrives = static_cast<int>(drivesToWipe.size());
@@ -1463,9 +1486,22 @@ INT_PTR MainWindow::HandleRecoveryMessage(HWND hWnd, UINT message, WPARAM wParam
             int sel = ComboBox_GetCurSel(hCombo);
             if (sel == CB_ERR) return (INT_PTR)TRUE;
             
-            wchar_t driveStr[128];
+            wchar_t driveStr[256];
             ComboBox_GetLBText(hCombo, sel, driveStr);
-            std::wstring drive(driveStr);
+            std::wstring rawDrive(driveStr);
+            std::wstring driveKey = ExtractDrivePath(rawDrive);
+
+            if (IsMtpDevice(driveKey) || IsMtpDevice(rawDrive)) {
+                std::wstring msg = L"스마트폰(휴대폰) 파일 복구 안내:\n\n"
+                    L"안드로이드 및 iOS 스마트폰은 OS 자체 보안 및 파일시스템 보호 정책으로 인해 USB MTP 연결 상태에서 PC를 통한 로우 섹터(MFT/FAT 블록) 직접 복구가 제한됩니다.\n\n"
+                    L"[권장 복구 방법]\n"
+                    L"1. 외장 SD 카드의 파일 복구:\n"
+                    L"   스마트폰에서 SD 카드를 분리한 후 PC의 SD 카드 리더기 또는 USB 리더기에 직접 연결하시면 clearMax에서 파일 복구 스캔이 정상 작동합니다.\n\n"
+                    L"2. 내부 저장소의 파일 복구:\n"
+                    L"   스마트폰 제조사 공식 백업/복원 도구(삼성 Smart Switch 등) 또는 안드로이드 디버깅(ADB) 기반 전용 복구 솔루션을 이용해 주시기 바랍니다.";
+                MessageBoxW(hWnd, msg.c_str(), L"스마트폰(MTP) 복구 안내", MB_OK | MB_ICONINFORMATION);
+                return (INT_PTR)TRUE;
+            }
             
             m_cancelRecovery = false;
             m_pauseRecovery = false;
@@ -1478,7 +1514,7 @@ INT_PTR MainWindow::HandleRecoveryMessage(HWND hWnd, UINT message, WPARAM wParam
             TreeView_DeleteAllItems(GetDlgItem(hWnd, IDC_TREE_RECOVERY));
             SetDlgItemTextW(hWnd, IDC_LBL_REC_STATUS, L"Scanning...");
             
-            std::thread([this, hWnd, drive]() {
+            std::thread([this, hWnd, driveKey]() {
                 auto cancelCheck = [this]() -> bool {
                     while (m_pauseRecovery) {
                         if (m_cancelRecovery) return true;
@@ -1492,7 +1528,7 @@ INT_PTR MainWindow::HandleRecoveryMessage(HWND hWnd, UINT message, WPARAM wParam
                 auto startTime = std::chrono::steady_clock::now();
                 std::vector<std::wstring> drivesToScan;
                 
-                if (drive.find(L"All Drives") != std::wstring::npos) {
+                if (driveKey == L"ALL") {
                     DWORD drives = GetLogicalDrives();
                     for (int i = 0; i < 26; ++i) {
                         if (drives & (1 << i)) {
@@ -1501,7 +1537,7 @@ INT_PTR MainWindow::HandleRecoveryMessage(HWND hWnd, UINT message, WPARAM wParam
                         }
                     }
                 } else {
-                    drivesToScan.push_back(drive);
+                    drivesToScan.push_back(driveKey);
                 }
                 
                 int totalDrives = static_cast<int>(drivesToScan.size());
@@ -1607,11 +1643,25 @@ INT_PTR MainWindow::HandleRecoveryMessage(HWND hWnd, UINT message, WPARAM wParam
                                 // Need original drive path
                                 HWND hCombo = GetDlgItem(hWnd, IDC_CMB_DRIVE);
                                 int drvSel = ComboBox_GetCurSel(hCombo);
-                                wchar_t driveStr[10];
+                                wchar_t driveStr[256] = {};
                                 ComboBox_GetLBText(hCombo, drvSel, driveStr);
+                                std::wstring targetDrive = ExtractDrivePath(driveStr);
+                                if (targetDrive == L"ALL" || targetDrive.empty()) {
+                                    targetDrive = L"C:\\";
+                                }
                                 
+                                bool recSuccess = false;
                                 NtfsRecovery ntfs;
-                                if (ntfs.recoverFile(driveStr, rf, destPath)) {
+                                if (ntfs.recoverFile(targetDrive, rf, destPath)) {
+                                    recSuccess = true;
+                                } else {
+                                    FatRecovery fat;
+                                    if (fat.recoverFile(targetDrive, rf, destPath)) {
+                                        recSuccess = true;
+                                    }
+                                }
+
+                                if (recSuccess) {
                                     MessageBoxW(hWnd, L"파일 복구가 완료되었습니다.", L"성공", MB_OK);
                                 } else {
                                     MessageBoxW(hWnd, L"파일 복구에 실패했습니다. (지원되지 않는 파일 시스템이거나 덮어써짐)", L"실패", MB_OK | MB_ICONERROR);
@@ -1632,16 +1682,221 @@ INT_PTR MainWindow::HandleRecoveryMessage(HWND hWnd, UINT message, WPARAM wParam
     return (INT_PTR)FALSE;
 }
 
-void MainWindow::PopulateDrivesCombo(HWND hCombo) {
-    ComboBox_AddString(hCombo, L"모든 드라이브 (All Drives)");
+namespace {
+    std::wstring FormatBytesForDrive(uint64_t bytes) {
+        const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB", L"TB" };
+        int unitIndex = 0;
+        double size = (double)bytes;
+        while (size >= 1024.0 && unitIndex < 4) {
+            size /= 1024.0;
+            unitIndex++;
+        }
+        wchar_t buf[32];
+        swprintf(buf, 32, L"%.1f %s", size, units[unitIndex]);
+        return buf;
+    }
+
+    STORAGE_BUS_TYPE GetDriveBusType(wchar_t driveLetter) {
+        wchar_t devPath[16];
+        swprintf(devPath, 16, L"\\\\.\\%c:", driveLetter);
+        HANDLE hDevice = CreateFileW(devPath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (hDevice == INVALID_HANDLE_VALUE) return BusTypeUnknown;
+
+        STORAGE_PROPERTY_QUERY query = {};
+        query.PropertyId = StorageDeviceProperty;
+        query.QueryType = PropertyStandardQuery;
+
+        BYTE buffer[1024] = {};
+        DWORD bytesReturned = 0;
+        STORAGE_BUS_TYPE busType = BusTypeUnknown;
+
+        if (DeviceIoControl(hDevice, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), buffer, sizeof(buffer), &bytesReturned, NULL)) {
+            STORAGE_DEVICE_DESCRIPTOR* desc = (STORAGE_DEVICE_DESCRIPTOR*)buffer;
+            busType = desc->BusType;
+        }
+        CloseHandle(hDevice);
+        return busType;
+    }
+
+    struct MtpDeviceEntry {
+        std::wstring friendlyName;
+        std::wstring description;
+        std::wstring deviceId;
+    };
+
+    std::vector<MtpDeviceEntry> EnumerateConnectedMtpDevices() {
+        std::vector<MtpDeviceEntry> result;
+        IPortableDeviceManager* pDevMgr = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_PortableDeviceManager, NULL, CLSCTX_INPROC_SERVER, IID_IPortableDeviceManager, (void**)&pDevMgr);
+        if (SUCCEEDED(hr) && pDevMgr) {
+            DWORD count = 0;
+            if (SUCCEEDED(pDevMgr->GetDevices(NULL, &count)) && count > 0) {
+                std::vector<LPWSTR> deviceIDs(count, nullptr);
+                if (SUCCEEDED(pDevMgr->GetDevices(deviceIDs.data(), &count))) {
+                    for (DWORD i = 0; i < count; ++i) {
+                        if (deviceIDs[i]) {
+                            MtpDeviceEntry dev;
+                            dev.deviceId = deviceIDs[i];
+                            
+                            DWORD nameLen = 0;
+                            pDevMgr->GetDeviceFriendlyName(deviceIDs[i], NULL, &nameLen);
+                            if (nameLen > 0) {
+                                std::vector<wchar_t> nameBuf(nameLen + 1, 0);
+                                if (SUCCEEDED(pDevMgr->GetDeviceFriendlyName(deviceIDs[i], nameBuf.data(), &nameLen))) {
+                                    dev.friendlyName = nameBuf.data();
+                                }
+                            }
+                            if (dev.friendlyName.empty()) {
+                                dev.friendlyName = L"휴대폰 (스마트폰)";
+                            }
+
+                            DWORD descLen = 0;
+                            pDevMgr->GetDeviceDescription(deviceIDs[i], NULL, &descLen);
+                            if (descLen > 0) {
+                                std::vector<wchar_t> descBuf(descLen + 1, 0);
+                                if (SUCCEEDED(pDevMgr->GetDeviceDescription(deviceIDs[i], descBuf.data(), &descLen))) {
+                                    dev.description = descBuf.data();
+                                }
+                            }
+
+                            result.push_back(dev);
+                            CoTaskMemFree(deviceIDs[i]);
+                        }
+                    }
+                }
+            }
+            pDevMgr->Release();
+        }
+        return result;
+    }
+}
+
+std::wstring MainWindow::ExtractDrivePath(const std::wstring& itemText) {
+    if (itemText.empty()) return L"";
+    if (itemText.find(L"All Drives") != std::wstring::npos || itemText.find(L"모든 드라이브") != std::wstring::npos) {
+        return L"ALL";
+    }
+    if (IsMtpDevice(itemText)) {
+        return L"MTP:" + itemText;
+    }
+    if (itemText.size() >= 2 && itemText[1] == L':') {
+        std::wstring driveRoot = itemText.substr(0, 2) + L"\\";
+        return driveRoot;
+    }
+    return itemText;
+}
+
+bool MainWindow::IsMtpDevice(const std::wstring& itemText) {
+    return itemText.find(L"[휴대폰]") != std::wstring::npos || itemText.find(L"MTP") != std::wstring::npos;
+}
+
+void MainWindow::PopulateDrivesCombo(HWND hCombo, bool includeAllDrives) {
+    if (!hCombo) return;
+
+    wchar_t prevSelText[256] = {};
+    int curSel = ComboBox_GetCurSel(hCombo);
+    if (curSel != CB_ERR) {
+        ComboBox_GetLBText(hCombo, curSel, prevSelText);
+    }
+    std::wstring prevDriveKey = ExtractDrivePath(prevSelText);
+
+    ComboBox_ResetContent(hCombo);
+
+    if (includeAllDrives) {
+        ComboBox_AddString(hCombo, L"모든 드라이브 (All Drives)");
+    }
+
     DWORD drives = GetLogicalDrives();
     for (int i = 0; i < 26; ++i) {
         if (drives & (1 << i)) {
-            wchar_t drive[] = { (wchar_t)('A' + i), L':', L'\\', L'\0' };
-            ComboBox_AddString(hCombo, drive);
+            wchar_t letter = (wchar_t)('A' + i);
+            wchar_t rootPath[] = { letter, L':', L'\\', L'\0' };
+            UINT type = GetDriveTypeW(rootPath);
+            STORAGE_BUS_TYPE busType = GetDriveBusType(letter);
+
+            wchar_t volName[MAX_PATH + 1] = {};
+            wchar_t fsName[MAX_PATH + 1] = {};
+            GetVolumeInformationW(rootPath, volName, MAX_PATH, NULL, NULL, NULL, fsName, MAX_PATH);
+
+            ULARGE_INTEGER freeBytes, totalBytes, totalFree;
+            uint64_t total = 0;
+            if (GetDiskFreeSpaceExW(rootPath, &freeBytes, &totalBytes, &totalFree)) {
+                total = totalBytes.QuadPart;
+            }
+
+            std::wstring typeStr = L"로컬 디스크";
+            if (busType == BusTypeUsb || type == DRIVE_REMOVABLE) {
+                typeStr = L"USB 드라이브";
+            } else if (busType == BusTypeSd) {
+                typeStr = L"SD 카드";
+            } else if (type == DRIVE_CDROM) {
+                typeStr = L"CD/DVD";
+            } else if (type == DRIVE_REMOTE) {
+                typeStr = L"네트워크 드라이브";
+            }
+
+            std::wstring displayLabel = std::wstring(rootPath) + L" [" + typeStr + L"]";
+            std::wstring details;
+            if (volName[0]) {
+                details += volName;
+            } else {
+                details += typeStr;
+            }
+            if (fsName[0]) {
+                details += L", " + std::wstring(fsName);
+            }
+            if (total > 0) {
+                details += L", " + FormatBytesForDrive(total);
+            }
+            if (!details.empty()) {
+                displayLabel += L" (" + details + L")";
+            }
+
+            ComboBox_AddString(hCombo, displayLabel.c_str());
         }
     }
-    ComboBox_SetCurSel(hCombo, 0);
+
+    // WPD / MTP 휴대폰 열거
+    auto mtpDevices = EnumerateConnectedMtpDevices();
+    for (const auto& dev : mtpDevices) {
+        std::wstring phoneLabel = L"[휴대폰] " + dev.friendlyName;
+        if (!dev.description.empty() && dev.description != dev.friendlyName) {
+            phoneLabel += L" (" + dev.description + L", MTP)";
+        } else {
+            phoneLabel += L" (MTP 휴대용 장치)";
+        }
+        ComboBox_AddString(hCombo, phoneLabel.c_str());
+    }
+
+    // 이전 선택 복원 시도
+    int newSel = 0;
+    if (!prevDriveKey.empty()) {
+        int count = ComboBox_GetCount(hCombo);
+        for (int i = 0; i < count; ++i) {
+            wchar_t text[256] = {};
+            ComboBox_GetLBText(hCombo, i, text);
+            if (ExtractDrivePath(text) == prevDriveKey) {
+                newSel = i;
+                break;
+            }
+        }
+    }
+    ComboBox_SetCurSel(hCombo, newSel);
+}
+
+void MainWindow::RefreshAllDriveCombos() {
+    if (m_hTabShredder) {
+        HWND hCmb = GetDlgItem(m_hTabShredder, IDC_CMB_WIPE_DRIVE);
+        if (hCmb) PopulateDrivesCombo(hCmb, true);
+    }
+    if (m_hTabRecovery) {
+        HWND hCmb = GetDlgItem(m_hTabRecovery, IDC_CMB_DRIVE);
+        if (hCmb) PopulateDrivesCombo(hCmb, true);
+    }
+    if (m_hTabAnalyzer) {
+        HWND hCmb = GetDlgItem(m_hTabAnalyzer, IDC_CMB_ANALYZER_DRIVE);
+        if (hCmb) PopulateDrivesCombo(hCmb, false);
+    }
 }
 
 static HTREEITEM InsertTreeItem(HWND hTree, HTREEITEM hParent, const std::wstring& text, LPARAM lParam) {
@@ -2274,17 +2529,7 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
     switch (message) {
         case WM_INITDIALOG: {
             HWND hCombo = GetDlgItem(hWnd, IDC_CMB_ANALYZER_DRIVE);
-            wchar_t driveStrings[256];
-            if (GetLogicalDriveStringsW(255, driveStrings)) {
-                wchar_t* drive = driveStrings;
-                while (*drive) {
-                    std::wstring d = drive;
-                    if (d.back() == L'\\') d.pop_back();
-                    SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)d.c_str());
-                    drive += wcslen(drive) + 1;
-                }
-            }
-            SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
+            PopulateDrivesCombo(hCombo, false);
 
             // Set up TreeView with system image list and double buffering
             HWND hTree = GetDlgItem(hWnd, IDC_TREE_ANALYZER);
@@ -2307,10 +2552,24 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
                 HWND hCombo = GetDlgItem(hWnd, IDC_CMB_ANALYZER_DRIVE);
                 int sel = SendMessageW(hCombo, CB_GETCURSEL, 0, 0);
                 if (sel != CB_ERR) {
-                    wchar_t buf[16];
+                    wchar_t buf[256];
                     SendMessageW(hCombo, CB_GETLBTEXT, sel, (LPARAM)buf);
-                    std::wstring drive = buf;
-                    drive += L"\\";
+                    std::wstring rawDrive(buf);
+                    std::wstring driveKey = ExtractDrivePath(rawDrive);
+
+                    if (IsMtpDevice(driveKey) || IsMtpDevice(rawDrive)) {
+                        std::wstring msg = L"스마트폰(휴대폰) 공간 분석 안내:\n\n"
+                            L"현재 MTP 프로토콜로 연결된 스마트폰은 Windows 드라이브 문자가 할당되지 않아 파일시스템 트리 직접 스캔이 제한됩니다.\n\n"
+                            L"[팁]\n"
+                            L"1. 스마트폰의 외장 SD 카드를 분리하여 PC 리더기에 연결하시면 전체 용량 및 폴더 트리를 고속으로 분석하실 수 있습니다.\n"
+                            L"2. 내부 저장소 분석은 스마트폰 설정의 [디바이스 케어 > 저장공간] 메뉴를 활용해 주시기 바랍니다.";
+                        MessageBoxW(hWnd, msg.c_str(), L"스마트폰(MTP) 공간 분석 안내", MB_OK | MB_ICONINFORMATION);
+                        return (INT_PTR)TRUE;
+                    }
+
+                    std::wstring drive = driveKey;
+                    if (drive.empty()) drive = L"C:\\";
+                    else if (drive.back() != L'\\') drive += L"\\";
                     
                     EnableWindow(GetDlgItem(hWnd, IDC_BTN_ANALYZER_SCAN), FALSE);
                     EnableWindow(GetDlgItem(hWnd, IDC_CMB_ANALYZER_DRIVE), FALSE);
@@ -2386,7 +2645,8 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
                     if (driveSel != CB_ERR) {
                         wchar_t buf[256];
                         SendMessageW(hCombo, CB_GETLBTEXT, driveSel, (LPARAM)buf);
-                        drive = buf; drive += L"\\";
+                        drive = ExtractDrivePath(buf);
+                        if (!drive.empty() && drive.back() != L'\\') drive += L"\\";
                     }
                     
                     SHFILEINFOW sfi = {0};
@@ -2473,9 +2733,10 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
                 HWND hCombo = GetDlgItem(hWnd, IDC_CMB_ANALYZER_DRIVE);
                 int count = SendMessageW(hCombo, CB_GETCOUNT, 0, 0);
                 for (int i = 0; i < count; ++i) {
-                    wchar_t buf[16];
+                    wchar_t buf[256];
                     SendMessageW(hCombo, CB_GETLBTEXT, i, (LPARAM)buf);
-                    if (_wcsicmp(buf, driveRoot.c_str()) == 0) {
+                    std::wstring candidate = ExtractDrivePath(buf);
+                    if (_wcsnicmp(candidate.c_str(), driveRoot.c_str(), 2) == 0) {
                         SendMessageW(hCombo, CB_SETCURSEL, i, 0);
                         break;
                     }

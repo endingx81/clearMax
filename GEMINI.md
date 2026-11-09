@@ -96,6 +96,10 @@ AI 에이전트(당신)가 개발 중 **실제로 저질렀던 치명적인 실�
 - Windows PowerShell에서 `Add-Content`나 `Out-File` 등의 명령어로 텍스트 파일에 내용을 덧붙이거나 작성할 때, 기본 인코딩(ANSI 등)이 적용되어 기존 UTF-8(특히 한글)이 깨지는 현상이 발생함.
 - 따라서 파일 I/O를 수행하는 셸 스크립트를 작성할 때는 반드시 `-Encoding UTF8` 파라미터를 명시하여 인코딩 깨짐을 원천 차단할 것.
 
+### 🖥️ Windows 배치 스크립트(.bat) 생성/수정 시 CP949(EUC-KR) 인코딩 강제
+- **배경**: 한국어 Windows 명령 프롬프트(`cmd.exe`)는 기본 콘솔 인코딩으로 CP949(코드페이지 949)를 사용함.
+- **철칙**: 배치 파일(`.bat`)에 한글 안내 메시지(`echo ...`)나 주석이 포함되는 경우, 일반 UTF-8로 저장하면 콘솔 실행 시 심각한 한글 깨짐(모지바케)이 발생하므로 반드시 한국어 Windows ANSI 규격인 **CP949(EUC-KR)**로 명시적으로 인코딩하여 저장할 것. (PowerShell 조작 시 `[System.Text.Encoding]::GetEncoding(949)` 또는 Python `encoding='cp949'` 사용)
+
 ### 📝 C++ 파일/스크립트 I/O 시 std::wofstream 사용 절대 금지 (유니코드 변환 중단 참사)
 - **실제 실수**: `std::wofstream`을 기본 로케일 상태에서 사용하여 스크립트 작성 중 한글 주석(`:: 1. 안전모드...`)이 들어가는 순간 유니코드 변환 에러(`failbit`)가 발생하여 파일 쓰기가 36바이트에서 중단됨. 결과적으로 핵심 복구 명령어(`bcdedit /deletevalue ...`)와 자동 재부팅 명령어(`shutdown /r`)가 스크립트에서 완전히 누락되어 사용자의 PC가 안전모드 무한 루프에 갇히는 치명적인 참사를 유발함.
 - **방지 원칙**: 스크립트/배치 파일이나 설정 파일 생성 시 `std::wofstream`을 절대 쓰지 말 것. 반드시 명시적인 UTF-8 변환(`WideCharToMultiByte(CP_UTF8, ...)` 또는 `toUtf8` 람다)을 거쳐 `std::ofstream` + 바이너리(`ios::binary`)로 출력하거나, 배치 파일 주석 및 명령어는 100% 영문 ASCII로만 작성하여 인코딩 오류 가능성을 0%로 차단할 것.
@@ -161,6 +165,19 @@ AI 에이전트(당신)가 개발 중 **실제로 저질렀던 치명적인 실�
   2. **후속 프로세스의 경로 전달 후 즉시 종료**: 뒤이어 동시 실행된 후속 프로세스들은 뮤텍스 중복(`ERROR_ALREADY_EXISTS`)을 감지하면, 최대 3초간 재시도 루프로 Leader 창을 탐색하여 `WM_COPYDATA`로 자신이 맡은 파일/폴더 경로만 쏙 넘겨주고 즉시 프로세스를 조용히 종료(`return 0`)할 것.
   3. **다중 파일 목록 수용 UI (`ListBox`)**: 대화상자는 단일 텍스트가 아닌 `ListBox`와 카운트 라벨(`총 N개 항목`)을 탑재하여, 전달받은 경로들을 실시간으로 목록에 추가하고 한 번의 클릭으로 일괄 순차 파쇄를 수행할 것.
   4. **폴더 재귀 파쇄 지원**: `FileShredder::shredPath`가 일반 파일과 디렉터리를 자동 분기하여, 폴더 내부의 모든 하위 파일/하위 폴더를 재귀적으로 안전 덮어쓰기 파쇄 후 빈 디렉터리까지 완전 소멸시키므로 파일+폴더 혼합 선택도 안전하게 지원할 것.
+
+### 📱 USB 외장 드라이브 및 스마트폰(MTP/WPD) 통합 열거 및 핫플러그(WM_DEVICECHANGE) 파이프라인
+- **실제 문제**:
+  - `GetLogicalDrives()`만 사용하면 휴대폰(안드로이드/아이폰 등 스마트폰)은 드라이브 문자(A~Z)가 할당되지 않는 WPD(Windows Portable Devices / MTP) 인터페이스를 사용하므로 목록에서 완전히 누락됨.
+  - USB 외장 HDD/SSD는 `DRIVE_FIXED`로 반환되므로 단순 `GetDriveType`만으로는 USB인지 구분할 수 없으며, 단순히 `E:\`로만 표시되어 사용자가 USB인지 로컬 디스크인지 식별할 수 없음.
+  - 프로그램이 켜진 상태에서 USB나 스마트폰을 꽂아도 드라이브 목록이 갱신되지 않아 재실행해야 하는 불편이 발생함.
+- **방지 및 해결 원칙**:
+  1. **WPD API (`IPortableDeviceManager`) 연동**: `CoCreateInstance(CLSID_PortableDeviceManager)`를 통해 연결된 스마트폰(Galaxy, iPhone 등)의 FriendlyName 및 장치 모델명을 수집하여 `[휴대폰] 희의 S23+ (SM-S916N, MTP)` 형태로 드라이브 목록에 명확히 표출할 것.
+  2. **USB/SD 정밀 버스 감지 (`IOCTL_STORAGE_QUERY_PROPERTY`)**: 드라이브 핸들(`\\.\X:`)을 열어 `STORAGE_DEVICE_DESCRIPTOR::BusType`을 조회, `BusTypeUsb` 및 `BusTypeSd`를 감지하여 외장 하드와 USB 메모리를 100% 정밀 분류하고 볼륨명, 파일시스템, 총 용량을 함께 친절히 표시할 것.
+  3. **실시간 핫플러그 감지 (`WM_DEVICECHANGE`)**: 메인 창 프로시저에서 `DBT_DEVICEARRIVAL`, `DBT_DEVICEREMOVECOMPLETE`, `DBT_DEVNODES_CHANGED` 수신 시 파쇄/복구/공간 분석 3대 탭의 드라이브 콤보박스를 즉시 동기화 새로고침할 것.
+  4. **라벨 상세화에 따른 스택 버퍼 오버플로우 방어 및 안전 경로 파서**: 드라이브 콤보박스에 상세 정보가 들어가므로 `wchar_t buf[16]` 같은 작은 버퍼를 금지하고 최소 256자 이상을 할당하며, 백엔드 엔진에는 `ExtractDrivePath`를 통해 순수 드라이브 루트(`G:\`)만 안전하게 추출 전달할 것.
+  5. **MTP 장치 프로토콜 특성 분기**: MTP 장치는 Windows 드라이브 문자가 없고 블록 레벨(MFT/FAT LBA) 접근이 원천 차단되므로, 복구/와이프 시 크래시나 무반응 대신 친절한 가이드 팝업(외장 SD카드 리더기 분리 연결 권장, 상단 탐색기 창을 통한 개별 파일 파쇄 권장 등)을 제공할 것.
+  6. **복구(Recovery) 모듈 파일시스템 Fallback 완결성**: 스캔 단계뿐 아니라 실제 파일 복구 단계(`recoverFile`)에서도 `NtfsRecovery` 실패 시 `FatRecovery`를 연쇄 호출하여 FAT32/exFAT(대다수 USB 메모리 및 SD 카드) 복구가 정상 동작하도록 보장할 것.
 
 ---
 

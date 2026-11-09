@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(clearMax VERSION 1.15 LANGUAGES CXX)
+project(clearMax VERSION 1.16 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,5 +49,5 @@ endif()
 
 # Windows API libraries
 if(WIN32)
-    target_link_libraries(clearMax PRIVATE Advapi32 Shell32 User32 Shlwapi Comctl32 Ole32)
+    target_link_libraries(clearMax PRIVATE Advapi32 Shell32 User32 Shlwapi Comctl32 Ole32 PortableDeviceGuids)
 endif()

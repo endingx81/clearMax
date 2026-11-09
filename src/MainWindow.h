@@ -96,8 +96,13 @@ private:
     int m_sortColumn = -1;
     bool m_sortAscending = true;
     
+    // Drive & Device Logic
+    void PopulateDrivesCombo(HWND hCombo, bool includeAllDrives = true);
+    void RefreshAllDriveCombos();
+    static std::wstring ExtractDrivePath(const std::wstring& itemText);
+    static bool IsMtpDevice(const std::wstring& itemText);
+
     // Recovery Logic
-    void PopulateDrivesCombo(HWND hCombo);
     void PopulateRecoveryTree(HWND hTree);
     void FilterRecoveryTree(HWND hTree, const std::wstring& filter);
     void ShowRecoveryContextMenu(HWND hWnd, POINT pt);
