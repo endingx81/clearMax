@@ -1722,7 +1722,43 @@ namespace {
         std::wstring friendlyName;
         std::wstring description;
         std::wstring deviceId;
+        bool isActive = false;
     };
+
+    bool IsMtpDeviceActive(const std::wstring& deviceId) {
+        IPortableDevice* pDevice = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_PortableDeviceFTM, NULL, CLSCTX_INPROC_SERVER, IID_IPortableDevice, (void**)&pDevice);
+        if (FAILED(hr) || !pDevice) return false;
+
+        IPortableDeviceValues* pClientInfo = nullptr;
+        CoCreateInstance(CLSID_PortableDeviceValues, NULL, CLSCTX_INPROC_SERVER, IID_IPortableDeviceValues, (void**)&pClientInfo);
+        if (pClientInfo) {
+            pClientInfo->SetStringValue(WPD_CLIENT_NAME, L"clearMax");
+        }
+
+        bool active = false;
+        hr = pDevice->Open(deviceId.c_str(), pClientInfo);
+        if (SUCCEEDED(hr)) {
+            IPortableDeviceContent* pContent = nullptr;
+            if (SUCCEEDED(pDevice->Content(&pContent)) && pContent) {
+                IEnumPortableDeviceObjectIDs* pEnum = nullptr;
+                if (SUCCEEDED(pContent->EnumObjects(0, WPD_DEVICE_OBJECT_ID, NULL, &pEnum)) && pEnum) {
+                    LPWSTR obj[4];
+                    DWORD fetched = 0;
+                    if (SUCCEEDED(pEnum->Next(4, obj, &fetched)) && fetched > 0) {
+                        active = true;
+                        for (DWORD j = 0; j < fetched; ++j) CoTaskMemFree(obj[j]);
+                    }
+                    pEnum->Release();
+                }
+                pContent->Release();
+            }
+            pDevice->Close();
+        }
+        if (pClientInfo) pClientInfo->Release();
+        pDevice->Release();
+        return active;
+    }
 
     std::vector<MtpDeviceEntry> EnumerateConnectedMtpDevices() {
         std::vector<MtpDeviceEntry> result;
@@ -1759,6 +1795,7 @@ namespace {
                                 }
                             }
 
+                            dev.isActive = IsMtpDeviceActive(dev.deviceId);
                             result.push_back(dev);
                             CoTaskMemFree(deviceIDs[i]);
                         }
@@ -1767,10 +1804,28 @@ namespace {
             }
             pDevMgr->Release();
         }
+
+        // 활성 상태인 장치를 최우선으로 정렬
+        std::sort(result.begin(), result.end(), [](const MtpDeviceEntry& a, const MtpDeviceEntry& b) {
+            return a.isActive && !b.isActive;
+        });
+
         return result;
     }
+
     std::wstring GetMtpDeviceId(const std::wstring& label) {
         auto devs = EnumerateConnectedMtpDevices();
+        // 1순위: 라벨이 매칭되면서 실제 활성 상태인 디바이스
+        for (const auto& dev : devs) {
+            if (dev.isActive && label.find(dev.friendlyName) != std::wstring::npos) {
+                return dev.deviceId;
+            }
+        }
+        // 2순위: 활성 상태인 아무 디바이스
+        for (const auto& dev : devs) {
+            if (dev.isActive) return dev.deviceId;
+        }
+        // 3순위: 이름 매칭 디바이스
         for (const auto& dev : devs) {
             if (label.find(dev.friendlyName) != std::wstring::npos) {
                 return dev.deviceId;
@@ -2584,10 +2639,12 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
                         std::wstring deviceId = GetMtpDeviceId(rawDrive);
                         std::wstring deviceName = rawDrive;
 
+                        SetDlgItemTextW(hWnd, IDC_LBL_ANALYZER_PATH, L"스마트폰 연결 및 스캔 시작 중...");
+
                         std::thread([this, hWnd, deviceId, deviceName]() {
                             m_spaceAnalyzer->scanMtpDevice(deviceId, deviceName, [this, hWnd](int fileCount, const std::wstring& currentItem) {
                                 wchar_t statusBuf[128];
-                                swprintf_s(statusBuf, L"스마트폰 스캔 중... (%d개 파일) %s", fileCount, currentItem.c_str());
+                                swprintf_s(statusBuf, L"스마트폰 스캔 중... (%d개 항목) %s", fileCount, currentItem.c_str());
                                 SetDlgItemTextW(hWnd, IDC_LBL_ANALYZER_PATH, statusBuf);
                             }, [this]() -> bool {
                                 return m_cancelAnalyzer;
@@ -2622,6 +2679,37 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
                             });
                             PostMessageW(hWnd, WM_APP + 200, 0, 0);
                         }).detach();
+                    }
+
+                    // Add root node instantly
+                    Sleep(50);
+                    DirNode* root = m_spaceAnalyzer->getRoot();
+                    if (root) {
+                        SHFILEINFOW sfi = {0};
+                        if (isMtp) {
+                            SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                        } else {
+                            std::wstring drive = driveKey;
+                            if (drive.empty()) drive = L"C:\\";
+                            else if (drive.back() != L'\\') drive += L"\\";
+                            SHGetFileInfoW(drive.c_str(), FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                        }
+
+                        TVINSERTSTRUCTW tvis = {0};
+                        tvis.hParent = TVI_ROOT;
+                        tvis.hInsertAfter = TVI_LAST;
+                        tvis.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM | TVIF_CHILDREN;
+                        std::wstring rootText = L"               " + root->name;
+                        tvis.item.pszText = (LPWSTR)rootText.c_str();
+                        tvis.item.iImage = sfi.iIcon;
+                        tvis.item.iSelectedImage = sfi.iIcon;
+                        tvis.item.cChildren = 1;
+                        tvis.item.lParam = (LPARAM)root;
+
+                        HTREEITEM hRoot = TreeView_InsertItem(hTree, &tvis);
+                        if (hRoot) {
+                            TreeView_Expand(hTree, hRoot, TVE_EXPAND);
+                        }
                     }
 
                     SetTimer(hWnd, 1, 500, NULL); // UI update timer

@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <objbase.h>
 #include <commctrl.h>
 #include <atomic>
 #include <thread>
@@ -415,6 +416,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
         return 1;
     }
 
+    // Initialize COM for UI thread
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
     // Initialize Common Controls
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
@@ -451,5 +455,6 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
         }
     }
 
+    CoUninitialize();
     return (int)msg.wParam;
 }
