@@ -1769,6 +1769,16 @@ namespace {
         }
         return result;
     }
+    std::wstring GetMtpDeviceId(const std::wstring& label) {
+        auto devs = EnumerateConnectedMtpDevices();
+        for (const auto& dev : devs) {
+            if (label.find(dev.friendlyName) != std::wstring::npos) {
+                return dev.deviceId;
+            }
+        }
+        if (!devs.empty()) return devs[0].deviceId;
+        return L"";
+    }
 }
 
 std::wstring MainWindow::ExtractDrivePath(const std::wstring& itemText) {
@@ -1792,6 +1802,8 @@ bool MainWindow::IsMtpDevice(const std::wstring& itemText) {
 
 void MainWindow::PopulateDrivesCombo(HWND hCombo, bool includeAllDrives) {
     if (!hCombo) return;
+
+    SendMessageW(hCombo, CB_SETDROPPEDWIDTH, 450, 0);
 
     wchar_t prevSelText[256] = {};
     int curSel = ComboBox_GetCurSel(hCombo);
@@ -2557,20 +2569,8 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
                     std::wstring rawDrive(buf);
                     std::wstring driveKey = ExtractDrivePath(rawDrive);
 
-                    if (IsMtpDevice(driveKey) || IsMtpDevice(rawDrive)) {
-                        std::wstring msg = L"스마트폰(휴대폰) 공간 분석 안내:\n\n"
-                            L"현재 MTP 프로토콜로 연결된 스마트폰은 Windows 드라이브 문자가 할당되지 않아 파일시스템 트리 직접 스캔이 제한됩니다.\n\n"
-                            L"[팁]\n"
-                            L"1. 스마트폰의 외장 SD 카드를 분리하여 PC 리더기에 연결하시면 전체 용량 및 폴더 트리를 고속으로 분석하실 수 있습니다.\n"
-                            L"2. 내부 저장소 분석은 스마트폰 설정의 [디바이스 케어 > 저장공간] 메뉴를 활용해 주시기 바랍니다.";
-                        MessageBoxW(hWnd, msg.c_str(), L"스마트폰(MTP) 공간 분석 안내", MB_OK | MB_ICONINFORMATION);
-                        return (INT_PTR)TRUE;
-                    }
+                    bool isMtp = IsMtpDevice(driveKey) || IsMtpDevice(rawDrive);
 
-                    std::wstring drive = driveKey;
-                    if (drive.empty()) drive = L"C:\\";
-                    else if (drive.back() != L'\\') drive += L"\\";
-                    
                     EnableWindow(GetDlgItem(hWnd, IDC_BTN_ANALYZER_SCAN), FALSE);
                     EnableWindow(GetDlgItem(hWnd, IDC_CMB_ANALYZER_DRIVE), FALSE);
                     
@@ -2579,52 +2579,51 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
                     TreeView_DeleteAllItems(hTree);
                     
                     m_spaceAnalyzer = std::make_unique<SpaceAnalyzer>();
-                    
-                    uint64_t totalUsedSpace = 0;
-                    ULARGE_INTEGER freeBytesAvailable, totalNumberOfBytes, totalNumberOfFreeBytes;
-                    if (GetDiskFreeSpaceExW(drive.c_str(), &freeBytesAvailable, &totalNumberOfBytes, &totalNumberOfFreeBytes)) {
-                        totalUsedSpace = totalNumberOfBytes.QuadPart - totalNumberOfFreeBytes.QuadPart;
+
+                    if (isMtp) {
+                        std::wstring deviceId = GetMtpDeviceId(rawDrive);
+                        std::wstring deviceName = rawDrive;
+
+                        std::thread([this, hWnd, deviceId, deviceName]() {
+                            m_spaceAnalyzer->scanMtpDevice(deviceId, deviceName, [this, hWnd](int fileCount, const std::wstring& currentItem) {
+                                wchar_t statusBuf[128];
+                                swprintf_s(statusBuf, L"스마트폰 스캔 중... (%d개 파일) %s", fileCount, currentItem.c_str());
+                                SetDlgItemTextW(hWnd, IDC_LBL_ANALYZER_PATH, statusBuf);
+                            }, [this]() -> bool {
+                                return m_cancelAnalyzer;
+                            });
+                            PostMessageW(hWnd, WM_APP + 200, 0, 0);
+                        }).detach();
+                    } else {
+                        std::wstring drive = driveKey;
+                        if (drive.empty()) drive = L"C:\\";
+                        else if (drive.back() != L'\\') drive += L"\\";
+
+                        uint64_t totalUsedSpace = 0;
+                        ULARGE_INTEGER freeBytesAvailable, totalNumberOfBytes, totalNumberOfFreeBytes;
+                        if (GetDiskFreeSpaceExW(drive.c_str(), &freeBytesAvailable, &totalNumberOfBytes, &totalNumberOfFreeBytes)) {
+                            totalUsedSpace = totalNumberOfBytes.QuadPart - totalNumberOfFreeBytes.QuadPart;
+                        }
+
+                        std::thread([this, hWnd, drive, totalUsedSpace]() {
+                            m_spaceAnalyzer->scanPath(drive, [this, hWnd, totalUsedSpace](int p, const std::wstring& path) {
+                                if (totalUsedSpace > 0 && m_spaceAnalyzer->getRoot()) {
+                                    uint64_t currentSize = m_spaceAnalyzer->getRoot()->size;
+                                    double pct = (double)currentSize / totalUsedSpace * 100.0;
+                                    if (pct > 100.0) pct = 100.0;
+                                    wchar_t buf[64];
+                                    swprintf(buf, 64, L"스캔 진행율: %.1f%%", pct);
+                                    SetDlgItemTextW(hWnd, IDC_LBL_ANALYZER_PATH, buf);
+                                } else {
+                                    SetDlgItemTextW(hWnd, IDC_LBL_ANALYZER_PATH, L"스캔 진행 중...");
+                                }
+                            }, [this]() -> bool {
+                                return m_cancelAnalyzer;
+                            });
+                            PostMessageW(hWnd, WM_APP + 200, 0, 0);
+                        }).detach();
                     }
-                    
-                    std::thread([this, hWnd, drive, totalUsedSpace]() {
-                        m_spaceAnalyzer->scanPath(drive, [this, hWnd, totalUsedSpace](int p, const std::wstring& path) {
-                            if (totalUsedSpace > 0 && m_spaceAnalyzer->getRoot()) {
-                                uint64_t currentSize = m_spaceAnalyzer->getRoot()->size;
-                                double pct = (double)currentSize / totalUsedSpace * 100.0;
-                                if (pct > 100.0) pct = 100.0;
-                                wchar_t buf[64];
-                                swprintf(buf, 64, L"스캔 진행율: %.1f%%", pct);
-                                SetDlgItemTextW(hWnd, IDC_LBL_ANALYZER_PATH, buf);
-                            } else {
-                                SetDlgItemTextW(hWnd, IDC_LBL_ANALYZER_PATH, L"스캔 진행 중...");
-                            }
-                        }, [this]() -> bool {
-                            return m_cancelAnalyzer;
-                        });
-                        PostMessageW(hWnd, WM_APP + 200, 0, 0);
-                    }).detach();
-                    
-                    // Add root node instantly
-                    Sleep(50); // let it build root
-                    DirNode* root = m_spaceAnalyzer->getRoot();
-                    if (root) {
-                        SHFILEINFOW sfi = {0};
-                        SHGetFileInfoW(drive.c_str(), FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
-                        
-                        TVINSERTSTRUCTW tvis = {0};
-                        tvis.hParent = TVI_ROOT;
-                        tvis.hInsertAfter = TVI_LAST;
-                        tvis.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM | TVIF_CHILDREN;
-                        std::wstring rootText = L"               " + drive;
-                        tvis.item.pszText = (LPWSTR)rootText.c_str();
-                        tvis.item.iImage = sfi.iIcon;
-                        tvis.item.iSelectedImage = sfi.iIcon;
-                        tvis.item.cChildren = 1;
-                        tvis.item.lParam = (LPARAM)root;
-                        
-                        TreeView_InsertItem(hTree, &tvis);
-                    }
-                    
+
                     SetTimer(hWnd, 1, 500, NULL); // UI update timer
                 }
             } else if (HIWORD(wParam) == CBN_SELCHANGE && wmId == IDC_CMB_ANALYZER_SORT) {
@@ -2646,24 +2645,32 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
                         wchar_t buf[256];
                         SendMessageW(hCombo, CB_GETLBTEXT, driveSel, (LPARAM)buf);
                         drive = ExtractDrivePath(buf);
-                        if (!drive.empty() && drive.back() != L'\\') drive += L"\\";
+                        if (!drive.empty() && !IsMtpDevice(drive) && drive.back() != L'\\') drive += L"\\";
                     }
                     
                     SHFILEINFOW sfi = {0};
-                    SHGetFileInfoW(drive.c_str(), FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                    if (IsMtpDevice(drive) || IsMtpDevice(root->name)) {
+                        SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                    } else {
+                        SHGetFileInfoW(drive.c_str(), FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                    }
                     
                     TVINSERTSTRUCTW tvis = {0};
                     tvis.hParent = TVI_ROOT;
                     tvis.hInsertAfter = TVI_LAST;
                     tvis.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM | TVIF_CHILDREN;
-                    std::wstring rootText = L"               " + drive;
+                    std::wstring rootText = L"               " + root->name;
                     tvis.item.pszText = (LPWSTR)rootText.c_str();
                     tvis.item.iImage = sfi.iIcon;
                     tvis.item.iSelectedImage = sfi.iIcon;
                     tvis.item.cChildren = 1;
                     tvis.item.lParam = (LPARAM)root;
                     
-                    TreeView_InsertItem(hTree, &tvis);
+                    HTREEITEM hRoot = TreeView_InsertItem(hTree, &tvis);
+                    if (hRoot) {
+                        UpdateTreeViewNode(hTree, hRoot);
+                        TreeView_Expand(hTree, hRoot, TVE_EXPAND);
+                    }
                 }
             }
             return (INT_PTR)TRUE;
@@ -2673,6 +2680,24 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
             if (wParam == 1) {
                 HWND hTree = GetDlgItem(hWnd, IDC_TREE_ANALYZER);
                 HTREEITEM hRoot = TreeView_GetRoot(hTree);
+                if (!hRoot && m_spaceAnalyzer && m_spaceAnalyzer->getRoot()) {
+                    DirNode* root = m_spaceAnalyzer->getRoot();
+                    SHFILEINFOW sfi = {0};
+                    SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+
+                    TVINSERTSTRUCTW tvis = {0};
+                    tvis.hParent = TVI_ROOT;
+                    tvis.hInsertAfter = TVI_LAST;
+                    tvis.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM | TVIF_CHILDREN;
+                    std::wstring rootText = L"               " + root->name;
+                    tvis.item.pszText = (LPWSTR)rootText.c_str();
+                    tvis.item.iImage = sfi.iIcon;
+                    tvis.item.iSelectedImage = sfi.iIcon;
+                    tvis.item.cChildren = 1;
+                    tvis.item.lParam = (LPARAM)root;
+
+                    hRoot = TreeView_InsertItem(hTree, &tvis);
+                }
                 if (hRoot) {
                     if (!(TreeView_GetItemState(hTree, hRoot, TVIS_EXPANDED) & TVIS_EXPANDED)) {
                         TreeView_Expand(hTree, hRoot, TVE_EXPAND);
@@ -2804,8 +2829,27 @@ INT_PTR MainWindow::HandleAnalyzerMessage(HWND hWnd, UINT message, WPARAM wParam
             KillTimer(hWnd, 1);
             HWND hTree = GetDlgItem(hWnd, IDC_TREE_ANALYZER);
             HTREEITEM hRoot = TreeView_GetRoot(hTree);
+            if (!hRoot && m_spaceAnalyzer && m_spaceAnalyzer->getRoot()) {
+                DirNode* root = m_spaceAnalyzer->getRoot();
+                SHFILEINFOW sfi = {0};
+                SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+
+                TVINSERTSTRUCTW tvis = {0};
+                tvis.hParent = TVI_ROOT;
+                tvis.hInsertAfter = TVI_LAST;
+                tvis.item.mask = TVIF_TEXT | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM | TVIF_CHILDREN;
+                std::wstring rootText = L"               " + root->name;
+                tvis.item.pszText = (LPWSTR)rootText.c_str();
+                tvis.item.iImage = sfi.iIcon;
+                tvis.item.iSelectedImage = sfi.iIcon;
+                tvis.item.cChildren = 1;
+                tvis.item.lParam = (LPARAM)root;
+
+                hRoot = TreeView_InsertItem(hTree, &tvis);
+            }
             if (hRoot) {
                 UpdateTreeViewNode(hTree, hRoot);
+                TreeView_Expand(hTree, hRoot, TVE_EXPAND);
                 InvalidateRect(hTree, NULL, FALSE);
             }
             SetDlgItemTextW(hWnd, IDC_LBL_ANALYZER_PATH, L"스캔 완료");

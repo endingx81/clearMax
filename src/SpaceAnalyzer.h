@@ -40,6 +40,7 @@ public:
     };
 
     void scanPath(const std::wstring& path, std::function<void(int, const std::wstring&)> progressCallback, std::function<bool()> cancelCheck);
+    bool scanMtpDevice(const std::wstring& deviceId, const std::wstring& deviceName, std::function<void(int, const std::wstring&)> progressCallback, std::function<bool()> cancelCheck);
     
     DirNode* getRoot() { return m_root.get(); }
     
@@ -57,4 +58,5 @@ private:
     std::wstring m_currentPath;
     
     void scanRecursive(DirNode* node, const std::wstring& path, std::function<void(int, const std::wstring&)>& progressCallback, std::function<bool()>& cancelCheck);
+    void scanMtpRecursive(void* pContentPtr, void* pPropsPtr, const wchar_t* parentId, DirNode* parentNode, std::function<void(int, const std::wstring&)>& progressCallback, std::function<bool()>& cancelCheck);
 };

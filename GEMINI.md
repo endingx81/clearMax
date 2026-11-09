@@ -175,8 +175,12 @@ AI 에이전트(당신)가 개발 중 **실제로 저질렀던 치명적인 실�
   1. **WPD API (`IPortableDeviceManager`) 연동**: `CoCreateInstance(CLSID_PortableDeviceManager)`를 통해 연결된 스마트폰(Galaxy, iPhone 등)의 FriendlyName 및 장치 모델명을 수집하여 `[휴대폰] 희의 S23+ (SM-S916N, MTP)` 형태로 드라이브 목록에 명확히 표출할 것.
   2. **USB/SD 정밀 버스 감지 (`IOCTL_STORAGE_QUERY_PROPERTY`)**: 드라이브 핸들(`\\.\X:`)을 열어 `STORAGE_DEVICE_DESCRIPTOR::BusType`을 조회, `BusTypeUsb` 및 `BusTypeSd`를 감지하여 외장 하드와 USB 메모리를 100% 정밀 분류하고 볼륨명, 파일시스템, 총 용량을 함께 친절히 표시할 것.
   3. **실시간 핫플러그 감지 (`WM_DEVICECHANGE`)**: 메인 창 프로시저에서 `DBT_DEVICEARRIVAL`, `DBT_DEVICEREMOVECOMPLETE`, `DBT_DEVNODES_CHANGED` 수신 시 파쇄/복구/공간 분석 3대 탭의 드라이브 콤보박스를 즉시 동기화 새로고침할 것.
-  4. **라벨 상세화에 따른 스택 버퍼 오버플로우 방어 및 안전 경로 파서**: 드라이브 콤보박스에 상세 정보가 들어가므로 `wchar_t buf[16]` 같은 작은 버퍼를 금지하고 최소 256자 이상을 할당하며, 백엔드 엔진에는 `ExtractDrivePath`를 통해 순수 드라이브 루트(`G:\`)만 안전하게 추출 전달할 것.
-  5. **MTP 장치 프로토콜 특성 분기**: MTP 장치는 Windows 드라이브 문자가 없고 블록 레벨(MFT/FAT LBA) 접근이 원천 차단되므로, 복구/와이프 시 크래시나 무반응 대신 친절한 가이드 팝업(외장 SD카드 리더기 분리 연결 권장, 상단 탐색기 창을 통한 개별 파일 파쇄 권장 등)을 제공할 것.
+  4. **라벨 상세화에 따른 RC 컨트롤 너비 확장 및 드롭다운(`CB_SETDROPPEDWIDTH`) 필수**:
+     - **실제 실수**: 드라이브 콤보박스에 상세 정보(`C:\ [로컬 디스크] (os, NTFS, 930.9 GB)`)나 스마트폰 장치명을 넣었음에도, `.rc` 파일의 콤보박스 너비(50~80 DLU)를 방치하여 닫힌 상태 및 드롭다운 목록에서 텍스트가 심하게 짤리는 엉성한 UI 참사를 유발함.
+     - **방지 원칙**: `.rc` 다이얼로그의 콤보박스 너비를 최소 150~175 DLU 이상으로 대폭 확장하고, 초기화 시 `SendMessage(hCombo, CB_SETDROPPEDWIDTH, 450, 0)`를 호출하여 드롭다운 리스트가 열릴 때 450px 이상으로 시원하게 펼쳐져 1글자도 잘리지 않도록 보장할 것.
+  5. **스마트폰(MTP) SpaceAnalyzer 실제 트리 구조 분석 파이프라인 (안내 팝업 핑계 금지)**:
+     - **실제 실수**: MTP 장치는 일반 드라이브 문자가 없다는 이유로 "직접 스캔이 제한됩니다"라는 안내 팝업만 띄우고 종료하는 무책임하고 안일한 태도를 보여 사용자의 극심한 분노를 유발함.
+     - **방지 원칙**: WPD API(`IPortableDevice`, `IPortableDeviceContent`, `IEnumPortableDeviceObjectIDs`, `IPortableDeviceProperties`)를 사용하면 스마트폰 내부 저장소의 모든 폴더/서브폴더/파일의 실제 바이트 크기(`WPD_OBJECT_SIZE`)와 이름(`WPD_OBJECT_NAME`)을 100% 읽어올 수 있음. `SpaceAnalyzer::scanMtpDevice` 재귀 엔진을 구축하여 스마트폰의 사진, 동영상, 음악, 문서 등 모든 내부 디렉터리를 `DirNode` 트리에 즉각 빌드하고, 일반 하드디스크와 동일하게 용량순/이름순 정렬 및 시각적 트리 탐색을 완벽 지원할 것.
   6. **복구(Recovery) 모듈 파일시스템 Fallback 완결성**: 스캔 단계뿐 아니라 실제 파일 복구 단계(`recoverFile`)에서도 `NtfsRecovery` 실패 시 `FatRecovery`를 연쇄 호출하여 FAT32/exFAT(대다수 USB 메모리 및 SD 카드) 복구가 정상 동작하도록 보장할 것.
 
 ---
