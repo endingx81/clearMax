@@ -734,23 +734,19 @@ namespace {
         return NULL;
     }
 
-    HICON FindStartMenuIconForProgram(const std::wstring& displayName, const std::wstring& installLocation) {
-        if (displayName.empty()) return NULL;
+    struct StartMenuShortcut {
+        std::wstring path;
+        std::wstring stemLower;
+        std::wstring targetLower;
+    };
+    static std::vector<StartMenuShortcut> s_startMenuShortcuts;
+    static bool s_startMenuCacheBuilt = false;
+
+    void BuildStartMenuCache(bool forceRefresh = false) {
+        if (s_startMenuCacheBuilt && !forceRefresh) return;
+        s_startMenuShortcuts.clear();
 
         int csidls[2] = { CSIDL_COMMON_PROGRAMS, CSIDL_PROGRAMS };
-        std::wstring lowerName = displayName;
-        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::towlower);
-        size_t bitPos = lowerName.find(L" 64-bit");
-        if (bitPos != std::wstring::npos) lowerName = lowerName.substr(0, bitPos);
-        bitPos = lowerName.find(L" (x64)");
-        if (bitPos != std::wstring::npos) lowerName = lowerName.substr(0, bitPos);
-
-        std::wstring lowerInstall = installLocation;
-        std::transform(lowerInstall.begin(), lowerInstall.end(), lowerInstall.begin(), ::towlower);
-        if (!lowerInstall.empty() && (lowerInstall.back() == L'\\' || lowerInstall.back() == L'/')) {
-            lowerInstall.pop_back();
-        }
-
         for (int csidl : csidls) {
             wchar_t szPath[MAX_PATH];
             if (FAILED(SHGetFolderPathW(NULL, csidl, NULL, 0, szPath))) continue;
@@ -764,29 +760,53 @@ namespace {
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
                 if (ext != L".lnk") continue;
 
-                std::wstring stem = entry.path().stem().wstring();
-                std::wstring stemLower = stem;
-                std::transform(stemLower.begin(), stemLower.end(), stemLower.begin(), ::towlower);
+                StartMenuShortcut sc;
+                sc.path = entry.path().wstring();
+                sc.stemLower = entry.path().stem().wstring();
+                std::transform(sc.stemLower.begin(), sc.stemLower.end(), sc.stemLower.begin(), ::towlower);
 
-                bool matched = false;
-                if (stemLower == lowerName || stemLower.find(lowerName) != std::wstring::npos || lowerName.find(stemLower) != std::wstring::npos) {
+                sc.targetLower = StartupMgr::resolveShortcutTarget(sc.path);
+                std::transform(sc.targetLower.begin(), sc.targetLower.end(), sc.targetLower.begin(), ::towlower);
+
+                s_startMenuShortcuts.push_back(std::move(sc));
+            }
+        }
+        s_startMenuCacheBuilt = true;
+    }
+
+    HICON FindStartMenuIconForProgram(const std::wstring& displayName, const std::wstring& installLocation) {
+        if (displayName.empty()) return NULL;
+        BuildStartMenuCache(false);
+
+        std::wstring lowerName = displayName;
+        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::towlower);
+        size_t bitPos = lowerName.find(L" 64-bit");
+        if (bitPos != std::wstring::npos) lowerName = lowerName.substr(0, bitPos);
+        bitPos = lowerName.find(L" (x64)");
+        if (bitPos != std::wstring::npos) lowerName = lowerName.substr(0, bitPos);
+
+        std::wstring lowerInstall = installLocation;
+        std::transform(lowerInstall.begin(), lowerInstall.end(), lowerInstall.begin(), ::towlower);
+        if (!lowerInstall.empty() && (lowerInstall.back() == L'\\' || lowerInstall.back() == L'/')) {
+            lowerInstall.pop_back();
+        }
+
+        for (const auto& sc : s_startMenuShortcuts) {
+            bool matched = false;
+            if (sc.stemLower == lowerName || sc.stemLower.find(lowerName) != std::wstring::npos || lowerName.find(sc.stemLower) != std::wstring::npos) {
+                matched = true;
+            }
+
+            if (!matched && !lowerInstall.empty() && !sc.targetLower.empty()) {
+                if (sc.targetLower.find(lowerInstall) == 0) {
                     matched = true;
                 }
+            }
 
-                if (!matched && !lowerInstall.empty()) {
-                    std::wstring target = StartupMgr::resolveShortcutTarget(entry.path().wstring());
-                    std::wstring targetLower = target;
-                    std::transform(targetLower.begin(), targetLower.end(), targetLower.begin(), ::towlower);
-                    if (!targetLower.empty() && targetLower.find(lowerInstall) == 0) {
-                        matched = true;
-                    }
-                }
-
-                if (matched) {
-                    SHFILEINFOW sfi = { 0 };
-                    if (SHGetFileInfoW(entry.path().c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON) && sfi.hIcon != NULL) {
-                        return sfi.hIcon;
-                    }
+            if (matched) {
+                SHFILEINFOW sfi = { 0 };
+                if (SHGetFileInfoW(sc.path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON) && sfi.hIcon != NULL) {
+                    return sfi.hIcon;
                 }
             }
         }
@@ -827,62 +847,106 @@ namespace {
 }
 
 void MainWindow::PopulateProgramsList(HWND hList) {
-    ListView_DeleteAllItems(hList);
-    m_programs = RegistryMgr::getInstalledPrograms();
-    
-    ImageList_RemoveAll(m_hProgImageList);
-    HICON hDefaultIcon = LoadIconW(NULL, IDI_APPLICATION);
-    int defaultIconIdx = ImageList_AddIcon(m_hProgImageList, hDefaultIcon);
+    if (ImageList_GetImageCount(m_hProgImageList) == 0) {
+        HICON hDefaultIcon = LoadIconW(NULL, IDI_APPLICATION);
+        ImageList_AddIcon(m_hProgImageList, hDefaultIcon);
+    }
+    const int defaultIconIdx = 0;
 
-    for (auto& prog : m_programs) {
-        HICON hIcon = NULL;
+    // 1. 기존 프로그램 메모리 캐시 맵 구성 (Delta Update 인덱싱)
+    std::unordered_map<std::wstring, const ProgramInfo*> oldMap;
+    oldMap.reserve(m_programs.size() * 2);
+    for (const auto& prog : m_programs) {
+        std::wstring key = prog.registryKeyPath.empty() ? (prog.displayName + L"|" + prog.displayVersion) : prog.registryKeyPath;
+        oldMap[key] = &prog;
+    }
 
-        // 1. DisplayIcon에서 추출
-        if (!prog.displayIcon.empty()) {
-            hIcon = ExtractIconFromSpec(prog.displayIcon);
+    // 2. 레지스트리에서 최신 설치 목록 로드
+    std::vector<ProgramInfo> newPrograms = RegistryMgr::getInstalledPrograms();
+    std::vector<size_t> dateFetchIndices;
+
+    // 3. 차분 대조 및 기존 정보/아이콘 재사용
+    for (size_t idx = 0; idx < newPrograms.size(); ++idx) {
+        auto& prog = newPrograms[idx];
+        std::wstring key = prog.registryKeyPath.empty() ? (prog.displayName + L"|" + prog.displayVersion) : prog.registryKeyPath;
+
+        auto it = oldMap.find(key);
+        bool reused = false;
+        if (it != oldMap.end()) {
+            const ProgramInfo* oldProg = it->second;
+            // 핵심 속성이 변경되지 않았으면 기존 아이콘 및 확인된 정보 100% 재사용 (디스크 I/O 생략)
+            if (oldProg->displayVersion == prog.displayVersion &&
+                oldProg->displayIcon == prog.displayIcon &&
+                oldProg->installLocation == prog.installLocation &&
+                oldProg->uninstallString == prog.uninstallString &&
+                oldProg->iconIndex >= 0) {
+
+                prog.iconIndex = oldProg->iconIndex;
+                prog.lastUsedDate = oldProg->lastUsedDate;
+                prog.isGhost = oldProg->isGhost;
+                reused = true;
+            }
         }
 
-        // 2. Fallback: installLocation 디렉터리 내 검색
-        if (!hIcon && !prog.installLocation.empty()) {
-            hIcon = FindDirectoryIconForProgram(prog.installLocation, prog.displayName);
+        if (!reused) {
+            HICON hIcon = NULL;
+
+            // 1. DisplayIcon에서 추출
+            if (!prog.displayIcon.empty()) {
+                hIcon = ExtractIconFromSpec(prog.displayIcon);
+            }
+
+            // 2. Fallback: installLocation 디렉터리 내 검색
+            if (!hIcon && !prog.installLocation.empty()) {
+                hIcon = FindDirectoryIconForProgram(prog.installLocation, prog.displayName);
+            }
+
+            // 3. Fallback: 시작 메뉴 바로가기 검색 (메모리 캐시 순회)
+            if (!hIcon) {
+                hIcon = FindStartMenuIconForProgram(prog.displayName, prog.installLocation);
+            }
+
+            // 4. Fallback: uninstallString에서 추출
+            if (!hIcon && !prog.uninstallString.empty()) {
+                hIcon = ExtractIconFromUninstallString(prog.uninstallString);
+            }
+
+            if (hIcon != NULL) {
+                prog.iconIndex = ImageList_AddIcon(m_hProgImageList, hIcon);
+                DestroyIcon(hIcon);
+            } else {
+                prog.iconIndex = defaultIconIdx;
+            }
         }
 
-        // 3. Fallback: 시작 메뉴 바로가기 검색
-        if (!hIcon) {
-            hIcon = FindStartMenuIconForProgram(prog.displayName, prog.installLocation);
-        }
-
-        // 4. Fallback: uninstallString에서 추출
-        if (!hIcon && !prog.uninstallString.empty()) {
-            hIcon = ExtractIconFromUninstallString(prog.uninstallString);
-        }
-
-        if (hIcon != NULL) {
-            prog.iconIndex = ImageList_AddIcon(m_hProgImageList, hIcon);
-            DestroyIcon(hIcon);
-        } else {
-            prog.iconIndex = defaultIconIdx;
+        if (prog.lastUsedDate.empty()) {
+            dateFetchIndices.push_back(idx);
         }
     }
+
+    m_programs = std::move(newPrograms);
 
     wchar_t searchBuf[256] = {0};
     GetDlgItemTextW(GetParent(hList), IDC_EDIT_PROG_SEARCH, searchBuf, 256);
     FilterProgramsList(hList, searchBuf);
 
-    int epoch = ++m_dateFetchEpoch;
-    HWND hTabProg = m_hTabPrograms;
-    std::thread([this, hTabProg, epoch]() {
-        for (size_t i = 0; i < m_programs.size(); ++i) {
-            if (m_dateFetchEpoch != epoch) break;
-            
-            std::wstring date = RegistryMgr::fetchLastUsedDate(m_programs[i].installLocation, m_programs[i].uninstallString);
-            if (!date.empty()) {
+    if (!dateFetchIndices.empty()) {
+        int epoch = ++m_dateFetchEpoch;
+        HWND hTabProg = m_hTabPrograms;
+        std::thread([this, hTabProg, epoch, dateFetchIndices]() {
+            for (size_t progIdx : dateFetchIndices) {
                 if (m_dateFetchEpoch != epoch) break;
-                std::wstring* pDate = new std::wstring(date);
-                PostMessageW(hTabProg, WM_UPDATE_PROG_DATE, (WPARAM)i, (LPARAM)pDate);
+                if (progIdx >= m_programs.size()) continue;
+
+                std::wstring date = RegistryMgr::fetchLastUsedDate(m_programs[progIdx].installLocation, m_programs[progIdx].uninstallString);
+                if (!date.empty()) {
+                    if (m_dateFetchEpoch != epoch) break;
+                    std::wstring* pDate = new std::wstring(date);
+                    PostMessageW(hTabProg, WM_UPDATE_PROG_DATE, (WPARAM)progIdx, (LPARAM)pDate);
+                }
             }
-        }
-    }).detach();
+        }).detach();
+    }
 }
 
 void MainWindow::FilterProgramsList(HWND hList, const std::wstring& filter) {

@@ -187,6 +187,22 @@ AI 에이전트(당신)가 개발 중 **실제로 저질렀던 치명적인 실�
        4. 스캔 시작 즉시 TreeView에 루트 노드를 바로 등록(`TreeView_InsertItem`)하여 사용자가 반응을 즉각 체감할 수 있도록 할 것.
   6. **복구(Recovery) 모듈 파일시스템 Fallback 완결성**: 스캔 단계뿐 아니라 실제 파일 복구 단계(`recoverFile`)에서도 `NtfsRecovery` 실패 시 `FatRecovery`를 연쇄 호출하여 FAT32/exFAT(대다수 USB 메모리 및 SD 카드) 복구가 정상 동작하도록 보장할 것.
 
+### ⚡ 설치 프로그램 새로고침 시 극심한 딜레이 방지: 메모리 캐시 및 차분 갱신(Delta Update) 원칙
+- **실제 실수**:
+  - 설치 프로그램 탭에서 새로고침(`PopulateProgramsList`)을 누를 때마다 기존 데이터를 무조건 전량 파기(`ImageList_RemoveAll`)하고, 수백 개의 프로그램 아이콘을 4단계 Fallback(특히 시작 메뉴 전체를 매 프로그램마다 `fs::recursive_directory_iterator`로 전수 뒤짐)으로 처음부터 100% 다시 추출함.
+  - 프로그램 200개 기준으로 매 새로고침마다 약 10만 회 이상의 디스크 I/O가 발생하여 UI가 수십 초간 멈추고 심각한 성능 저하를 초래함.
+- **방지 및 해결 원칙**:
+  1. **시작 메뉴 바로가기 전역 1회성 인덱싱 (`BuildStartMenuCache`)**:
+     - 시작 메뉴(`CSIDL_COMMON_PROGRAMS`, `CSIDL_PROGRAMS`)의 `.lnk` 파일과 target 경로를 프로그램별로 매번 디스크 순회하지 말고, 메모리 벡터(`s_startMenuShortcuts`)에 1회만 캐싱하여 디스크 I/O를 0으로 단축할 것.
+  2. **메모리 캐시 보존 및 차분 대조 (Delta Update)**:
+     - 기존 `m_programs` 목록을 `std::unordered_map`으로 인덱싱(`registryKeyPath` 기준).
+     - 레지스트리에서 새 목록을 읽어온 뒤, 기존에 이미 존재하는 프로그램(버전, 아이콘 경로, 설치 위치 등 미변경)은 기존 `iconIndex`, `lastUsedDate`, `isGhost`를 0.0001초 만에 그대로 재사용하고 아이콘 추출 및 디스크 조회를 100% Skip할 것.
+  3. **이미지 리스트(`ImageList`) 무분별한 파기 금지**:
+     - 새로고침 시 `ImageList_RemoveAll`을 호출하지 말고 기존에 로드된 아이콘들을 유지하며, 신규 설치되거나 아이콘이 변경된 프로그램만 `ImageList_AddIcon`으로 추가할 것.
+  4. **백그라운드 디스크 I/O(최근 사용 날짜 등) 차분 선별 갱신**:
+     - 이미 날짜가 조회된 프로그램은 백그라운드 스레드에서 재조회하지 말고, 신규/미확인 항목(`lastUsedDate.empty()`)만 선별하여 비동기 갱신할 것.
+  5. **효과**: 새로고침 소요 시간이 수십 초에서 0.03초(즉각 완료)로 극대화됨.
+
 ---
 
 # 3. 프로젝트 핵심 모듈 및 아키텍처 (Core Architecture)
