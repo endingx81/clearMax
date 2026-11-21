@@ -208,6 +208,12 @@ AI 에이전트(당신)가 개발 중 **실제로 저질렀던 치명적인 실�
   7. **백그라운드 워커 스레드 컬렉션 공유 배제 및 완전 격리(독립 값 복사) 원칙**:
      - **실제 실수**: 메인 스레드의 `m_programs` 벡터를 백그라운드 날짜 조회 스레드가 `m_programs[i]` 형태로 직접 참조함. 새로고침이 0.03초 만에 즉시 끝나게 되자, 사용자가 새로고침을 다시 누르는 순간 메인 스레드가 `m_programs = std::move(newPrograms)`로 기존 버퍼를 해제해버렸고, 워커 스레드가 해제된 힙 메모리를 참조하여 `Access Violation` 크래시 발생.
      - **방지 원칙**: 백그라운드 스레드에는 컨테이너의 포인터나 인덱스 대신, 비동기 작업에 필요한 데이터만 독립 구조체(`DateFetchTask`)로 **값 복사(Deep Copy/std::move)**하여 스레드에 넘길 것. 워커 스레드는 메인 컨테이너에 일절 접근하지 않으며, 결과는 `epoch`와 함께 윈도우 메시지(`PostMessageW`)로 메인 스레드에 안전하게 반환받아 메인 스레드에서만 갱신할 것.
+  8. **RegQueryValueExW 문자열 버퍼 할당 시 힙 오버런(Heap Corruption 0xc0000374) 방지**:
+     - **실제 실수**: `RegQueryValueExW`로 크기를 조회한 후 `std::vector<wchar_t> buffer(bufferSize / sizeof(wchar_t))`로 정확히 나눈 크기만 할당함. 일부 손상된 레지스트리 키의 바이트 수가 홀수이거나 null-terminator가 누락된 경우, 두 번째 호출에서 할당된 힙 버퍼 크기를 1~2바이트 초과하여 기록(Heap Overrun)하면서 NT Heap 청크 메타데이터를 파괴함. 결과적으로 다음 메모리 해제나 재할당 시점에 `0xc0000374 (STATUS_HEAP_CORRUPTION)`로 프로세스가 강제 종료됨.
+     - **방지 원칙**: 레지스트리 문자열 버퍼 할당 시에는 **반드시 `(bufferSize / sizeof(wchar_t)) + 2` 이상의 넉넉한 여유 버퍼를 0으로 초기화**하여 할당하고, `bufferSize > 0` 검증을 필수로 둘 것.
+  9. **새로고침 시 재진입 가드(Re-entrancy Guard) 및 Epoch 진입 즉시 갱신**:
+     - **실제 실수**: 새로고침 버튼 핸들러에서 검색창을 비우기 위해 `SetDlgItemTextW(..., L"")`를 호출하자마자 `EN_CHANGE` 이벤트가 동기적으로 트리거되어 `FilterProgramsList`가 실행되고, 직후 `PopulateProgramsList`가 또 `FilterProgramsList`를 호출하면서 리스트뷰 삭제/재배치가 중첩 충돌함. 또한 `++m_dateFetchEpoch`를 작업 맨 끝에서 올리는 바람에 이전 스레드가 즉시 멈추지 않고 계속 데이터를 쏘아대는 레이스 컨디션 발생.
+     - **방지 원칙**: 새로고침 진입 즉시 `m_bUpdatingPrograms = true` 가드를 걸어 중복 필터링을 방어하고, 함수 첫 줄에서 `int epoch = ++m_dateFetchEpoch;`를 최우선으로 실행하여 이전 백그라운드 스레드를 0.0001초 만에 즉각 탈출시킬 것.
 
 ---
 

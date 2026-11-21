@@ -514,12 +514,16 @@ INT_PTR MainWindow::HandleProgramsMessage(HWND hWnd, UINT message, WPARAM wParam
                 MessageBoxW(hWnd, L"프로그램을 선택해주세요.", L"알림", MB_OK);
             }
         } else if (wmId == IDC_BTN_PROG_REFRESH) {
+            m_bUpdatingPrograms = true;
             SetDlgItemTextW(hWnd, IDC_EDIT_PROG_SEARCH, L"");
+            m_bUpdatingPrograms = false;
             PopulateProgramsList(GetDlgItem(hWnd, IDC_LIST_PROGRAMS));
         } else if (HIWORD(wParam) == EN_CHANGE && wmId == IDC_EDIT_PROG_SEARCH) {
-            wchar_t searchBuf[256];
-            GetDlgItemTextW(hWnd, IDC_EDIT_PROG_SEARCH, searchBuf, 256);
-            FilterProgramsList(GetDlgItem(hWnd, IDC_LIST_PROGRAMS), searchBuf);
+            if (!m_bUpdatingPrograms) {
+                wchar_t searchBuf[256];
+                GetDlgItemTextW(hWnd, IDC_EDIT_PROG_SEARCH, searchBuf, 256);
+                FilterProgramsList(GetDlgItem(hWnd, IDC_LIST_PROGRAMS), searchBuf);
+            }
         }
     } else if (message == WM_NOTIFY) {
         LPNMHDR lpnmh = (LPNMHDR)lParam;
@@ -544,10 +548,14 @@ INT_PTR MainWindow::HandleProgramsMessage(HWND hWnd, UINT message, WPARAM wParam
         if (pRes) {
             if (pRes->epoch == m_dateFetchEpoch.load() && pRes->progIdx < m_programs.size()) {
                 m_programs[pRes->progIdx].lastUsedDate = pRes->date;
+                const auto& prog = m_programs[pRes->progIdx];
+                std::wstring key = prog.registryKeyPath.empty() ? (prog.displayName + L"|" + prog.displayVersion) : prog.registryKeyPath;
+                m_progCache[key].lastUsedDate = pRes->date;
+
                 HWND hList = GetDlgItem(hWnd, IDC_LIST_PROGRAMS);
                 int count = ListView_GetItemCount(hList);
                 for (int r = 0; r < count; ++r) {
-                    LVITEMW lvi;
+                    LVITEMW lvi = {0};
                     lvi.mask = LVIF_PARAM;
                     lvi.iItem = r;
                     lvi.iSubItem = 0;
@@ -854,43 +862,37 @@ namespace {
 }
 
 void MainWindow::PopulateProgramsList(HWND hList) {
+    // 0. 함수 진입 즉시 이전 백그라운드 스레드 즉각 중단!
+    int epoch = ++m_dateFetchEpoch;
+
     if (ImageList_GetImageCount(m_hProgImageList) == 0) {
         HICON hDefaultIcon = LoadIconW(NULL, IDI_APPLICATION);
         ImageList_AddIcon(m_hProgImageList, hDefaultIcon);
     }
     const int defaultIconIdx = 0;
 
-    // 1. 기존 프로그램 메모리 캐시 맵 구성 (Delta Update 인덱싱)
-    std::unordered_map<std::wstring, const ProgramInfo*> oldMap;
-    oldMap.reserve(m_programs.size() * 2);
-    for (const auto& prog : m_programs) {
-        std::wstring key = prog.registryKeyPath.empty() ? (prog.displayName + L"|" + prog.displayVersion) : prog.registryKeyPath;
-        oldMap[key] = &prog;
-    }
-
-    // 2. 레지스트리에서 최신 설치 목록 로드
+    // 1. 레지스트리에서 최신 설치 목록 로드 (0.02초)
     std::vector<ProgramInfo> newPrograms = RegistryMgr::getInstalledPrograms();
     std::vector<size_t> dateFetchIndices;
 
-    // 3. 차분 대조 및 기존 정보/아이콘 재사용
+    // 2. m_progCache 대조 (변경 없는 항목은 0 디스크 I/O로 즉각 재사용)
     for (size_t idx = 0; idx < newPrograms.size(); ++idx) {
         auto& prog = newPrograms[idx];
         std::wstring key = prog.registryKeyPath.empty() ? (prog.displayName + L"|" + prog.displayVersion) : prog.registryKeyPath;
 
-        auto it = oldMap.find(key);
+        auto it = m_progCache.find(key);
         bool reused = false;
-        if (it != oldMap.end()) {
-            const ProgramInfo* oldProg = it->second;
-            // 핵심 속성이 변경되지 않았으면 기존 아이콘 및 확인된 정보 100% 재사용 (디스크 I/O 생략)
-            if (oldProg->displayVersion == prog.displayVersion &&
-                oldProg->displayIcon == prog.displayIcon &&
-                oldProg->installLocation == prog.installLocation &&
-                oldProg->uninstallString == prog.uninstallString &&
-                oldProg->iconIndex >= 0) {
+        if (it != m_progCache.end()) {
+            const auto& cached = it->second;
+            if (cached.displayVersion == prog.displayVersion &&
+                cached.displayIcon == prog.displayIcon &&
+                cached.installLocation == prog.installLocation &&
+                cached.uninstallString == prog.uninstallString &&
+                cached.iconIndex >= 0) {
 
-                prog.iconIndex = oldProg->iconIndex;
-                prog.lastUsedDate = oldProg->lastUsedDate;
-                prog.isGhost = oldProg->isGhost;
+                prog.iconIndex = cached.iconIndex;
+                prog.lastUsedDate = cached.lastUsedDate;
+                prog.isGhost = cached.isGhost;
                 reused = true;
             }
         }
@@ -924,6 +926,16 @@ void MainWindow::PopulateProgramsList(HWND hList) {
             } else {
                 prog.iconIndex = defaultIconIdx;
             }
+
+            CachedProgData cdata;
+            cdata.iconIndex = prog.iconIndex;
+            cdata.lastUsedDate = prog.lastUsedDate;
+            cdata.isGhost = prog.isGhost;
+            cdata.displayVersion = prog.displayVersion;
+            cdata.displayIcon = prog.displayIcon;
+            cdata.installLocation = prog.installLocation;
+            cdata.uninstallString = prog.uninstallString;
+            m_progCache[key] = std::move(cdata);
         }
 
         if (prog.lastUsedDate.empty()) {
@@ -949,7 +961,6 @@ void MainWindow::PopulateProgramsList(HWND hList) {
     FilterProgramsList(hList, searchBuf);
 
     if (!tasks.empty()) {
-        int epoch = ++m_dateFetchEpoch;
         HWND hTabProg = m_hTabPrograms;
         std::thread([this, hTabProg, epoch, tasks = std::move(tasks)]() {
             for (const auto& task : tasks) {

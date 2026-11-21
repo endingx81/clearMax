@@ -15,13 +15,14 @@ namespace fs = std::filesystem;
 
 std::wstring RegistryMgr::getRegString(HKEY key, const std::wstring& valueName) {
     DWORD bufferSize = 0;
-    
-    if (RegQueryValueExW(key, valueName.c_str(), nullptr, nullptr, nullptr, &bufferSize) == ERROR_SUCCESS) {
-        std::vector<wchar_t> buffer(bufferSize / sizeof(wchar_t));
-        if (RegQueryValueExW(key, valueName.c_str(), nullptr, nullptr, reinterpret_cast<LPBYTE>(buffer.data()), &bufferSize) == ERROR_SUCCESS) {
-            // RegQueryValueExW might return string with null terminator, we don't want it in std::wstring length
-            size_t len = bufferSize / sizeof(wchar_t);
-            if (len > 0 && buffer[len-1] == L'\0') {
+    DWORD type = 0;
+    if (RegQueryValueExW(key, valueName.c_str(), nullptr, &type, nullptr, &bufferSize) == ERROR_SUCCESS && bufferSize > 0) {
+        size_t wcharCount = (bufferSize / sizeof(wchar_t)) + 2;
+        std::vector<wchar_t> buffer(wcharCount, 0);
+        DWORD readSize = bufferSize;
+        if (RegQueryValueExW(key, valueName.c_str(), nullptr, &type, reinterpret_cast<LPBYTE>(buffer.data()), &readSize) == ERROR_SUCCESS) {
+            size_t len = readSize / sizeof(wchar_t);
+            while (len > 0 && buffer[len - 1] == L'\0') {
                 len--;
             }
             return std::wstring(buffer.data(), len);

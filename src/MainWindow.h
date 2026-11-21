@@ -3,6 +3,7 @@
 #include <commctrl.h>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <map>
 #include <algorithm>
 #include "resource.h"
@@ -53,6 +54,17 @@ private:
     // Tab Data
     std::vector<RecoverableFile> m_recoveredFiles;
     std::vector<ProgramInfo> m_programs;
+    struct CachedProgData {
+        int iconIndex = -1;
+        std::wstring lastUsedDate;
+        bool isGhost = false;
+        std::wstring displayVersion;
+        std::wstring displayIcon;
+        std::wstring uninstallString;
+        std::wstring installLocation;
+    };
+    std::unordered_map<std::wstring, CachedProgData> m_progCache;
+    bool m_bUpdatingPrograms = false;
     std::vector<StartupItem> m_startupItems;
     HIMAGELIST m_hProgImageList;
     HIMAGELIST m_hStartupImageList;
