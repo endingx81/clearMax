@@ -225,7 +225,7 @@ static void ProcessTaskFolder(ITaskFolder* pRootFolder, std::vector<StartupItem>
 
 static void ScanScheduledTasks(std::vector<StartupItem>& items) {
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    bool coInit = SUCCEEDED(hr);
+    bool coInit = (hr == S_OK);
 
     ITaskService* pService = NULL;
     hr = CoCreateInstance(CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, IID_ITaskService, (void**)&pService);
@@ -283,7 +283,7 @@ bool StartupMgr::setStartupItemState(StartupItem& item, bool enable) {
 
     if (item.isScheduledTask) {
         HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-        bool coInit = SUCCEEDED(hr);
+        bool coInit = (hr == S_OK);
         bool success = false;
         ITaskService* pService = NULL;
         if (SUCCEEDED(CoCreateInstance(CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, IID_ITaskService, (void**)&pService))) {
@@ -386,7 +386,7 @@ bool StartupMgr::setStartupItemState(StartupItem& item, bool enable) {
 bool StartupMgr::deleteStartupItem(const StartupItem& item) {
     if (item.isScheduledTask) {
         HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-        bool coInit = SUCCEEDED(hr);
+        bool coInit = (hr == S_OK);
         bool success = false;
         ITaskService* pService = NULL;
         if (SUCCEEDED(CoCreateInstance(CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, IID_ITaskService, (void**)&pService))) {
@@ -427,7 +427,7 @@ bool StartupMgr::deleteStartupItem(const StartupItem& item) {
 std::wstring StartupMgr::resolveShortcutTarget(const std::wstring& lnkPath) {
     std::wstring targetPath = L"";
     HRESULT hrCo = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    bool coInit = SUCCEEDED(hrCo);
+    bool coInit = (hrCo == S_OK);
 
     IShellLinkW* psl = NULL;
     HRESULT hr = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl);

@@ -370,6 +370,12 @@ INT_PTR CALLBACK MainWindow::ProgramsDlgProc(HWND hWnd, UINT message, WPARAM wPa
     return (INT_PTR)FALSE;
 }
 
+struct ProgDateResult {
+    int epoch;
+    size_t progIdx;
+    std::wstring date;
+};
+
 INT_PTR MainWindow::HandleProgramsMessage(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_SIZE) {
         if (wParam != SIZE_MINIMIZED) {
@@ -534,25 +540,26 @@ INT_PTR MainWindow::HandleProgramsMessage(HWND hWnd, UINT message, WPARAM wParam
             }
         }
     } else if (message == WM_UPDATE_PROG_DATE) {
-        int index = (int)wParam;
-        std::wstring* pDate = (std::wstring*)lParam;
-        if (index >= 0 && index < (int)m_programs.size()) {
-            m_programs[index].lastUsedDate = *pDate;
-            HWND hList = GetDlgItem(hWnd, IDC_LIST_PROGRAMS);
-            int count = ListView_GetItemCount(hList);
-            for (int r = 0; r < count; ++r) {
-                LVITEMW lvi;
-                lvi.mask = LVIF_PARAM;
-                lvi.iItem = r;
-                lvi.iSubItem = 0;
-                ListView_GetItem(hList, &lvi);
-                if (lvi.lParam == index) {
-                    ListView_SetItemText(hList, r, 5, (LPWSTR)pDate->c_str());
-                    break;
+        ProgDateResult* pRes = (ProgDateResult*)lParam;
+        if (pRes) {
+            if (pRes->epoch == m_dateFetchEpoch.load() && pRes->progIdx < m_programs.size()) {
+                m_programs[pRes->progIdx].lastUsedDate = pRes->date;
+                HWND hList = GetDlgItem(hWnd, IDC_LIST_PROGRAMS);
+                int count = ListView_GetItemCount(hList);
+                for (int r = 0; r < count; ++r) {
+                    LVITEMW lvi;
+                    lvi.mask = LVIF_PARAM;
+                    lvi.iItem = r;
+                    lvi.iSubItem = 0;
+                    ListView_GetItem(hList, &lvi);
+                    if (lvi.lParam == (LPARAM)pRes->progIdx) {
+                        ListView_SetItemText(hList, r, 5, (LPWSTR)pRes->date.c_str());
+                        break;
+                    }
                 }
             }
+            delete pRes;
         }
-        delete pDate;
         return (INT_PTR)TRUE;
     }
     return (INT_PTR)FALSE;
@@ -737,7 +744,6 @@ namespace {
     struct StartMenuShortcut {
         std::wstring path;
         std::wstring stemLower;
-        std::wstring targetLower;
     };
     static std::vector<StartMenuShortcut> s_startMenuShortcuts;
     static bool s_startMenuCacheBuilt = false;
@@ -764,10 +770,6 @@ namespace {
                 sc.path = entry.path().wstring();
                 sc.stemLower = entry.path().stem().wstring();
                 std::transform(sc.stemLower.begin(), sc.stemLower.end(), sc.stemLower.begin(), ::towlower);
-
-                sc.targetLower = StartupMgr::resolveShortcutTarget(sc.path);
-                std::transform(sc.targetLower.begin(), sc.targetLower.end(), sc.targetLower.begin(), ::towlower);
-
                 s_startMenuShortcuts.push_back(std::move(sc));
             }
         }
@@ -791,22 +793,27 @@ namespace {
             lowerInstall.pop_back();
         }
 
+        // 1단계: 바로가기 파일명 매칭 (디스크 I/O 없이 순수 메모리 비교)
         for (const auto& sc : s_startMenuShortcuts) {
-            bool matched = false;
             if (sc.stemLower == lowerName || sc.stemLower.find(lowerName) != std::wstring::npos || lowerName.find(sc.stemLower) != std::wstring::npos) {
-                matched = true;
-            }
-
-            if (!matched && !lowerInstall.empty() && !sc.targetLower.empty()) {
-                if (sc.targetLower.find(lowerInstall) == 0) {
-                    matched = true;
-                }
-            }
-
-            if (matched) {
                 SHFILEINFOW sfi = { 0 };
                 if (SHGetFileInfoW(sc.path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON) && sfi.hIcon != NULL) {
                     return sfi.hIcon;
+                }
+            }
+        }
+
+        // 2단계: 파일명으로 못 찾았을 때만 installLocation과 바로가기 대상(target) 매칭 (지연 로딩)
+        if (!lowerInstall.empty()) {
+            for (const auto& sc : s_startMenuShortcuts) {
+                std::wstring target = StartupMgr::resolveShortcutTarget(sc.path);
+                std::wstring targetLower = target;
+                std::transform(targetLower.begin(), targetLower.end(), targetLower.begin(), ::towlower);
+                if (!targetLower.empty() && targetLower.find(lowerInstall) == 0) {
+                    SHFILEINFOW sfi = { 0 };
+                    if (SHGetFileInfoW(sc.path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON) && sfi.hIcon != NULL) {
+                        return sfi.hIcon;
+                    }
                 }
             }
         }
@@ -924,25 +931,35 @@ void MainWindow::PopulateProgramsList(HWND hList) {
         }
     }
 
+    struct DateFetchTask {
+        size_t progIdx;
+        std::wstring installLocation;
+        std::wstring uninstallString;
+    };
+    std::vector<DateFetchTask> tasks;
+    tasks.reserve(dateFetchIndices.size());
+    for (size_t progIdx : dateFetchIndices) {
+        tasks.push_back({ progIdx, newPrograms[progIdx].installLocation, newPrograms[progIdx].uninstallString });
+    }
+
     m_programs = std::move(newPrograms);
 
     wchar_t searchBuf[256] = {0};
     GetDlgItemTextW(GetParent(hList), IDC_EDIT_PROG_SEARCH, searchBuf, 256);
     FilterProgramsList(hList, searchBuf);
 
-    if (!dateFetchIndices.empty()) {
+    if (!tasks.empty()) {
         int epoch = ++m_dateFetchEpoch;
         HWND hTabProg = m_hTabPrograms;
-        std::thread([this, hTabProg, epoch, dateFetchIndices]() {
-            for (size_t progIdx : dateFetchIndices) {
-                if (m_dateFetchEpoch != epoch) break;
-                if (progIdx >= m_programs.size()) continue;
+        std::thread([this, hTabProg, epoch, tasks = std::move(tasks)]() {
+            for (const auto& task : tasks) {
+                if (m_dateFetchEpoch.load() != epoch) break;
 
-                std::wstring date = RegistryMgr::fetchLastUsedDate(m_programs[progIdx].installLocation, m_programs[progIdx].uninstallString);
+                std::wstring date = RegistryMgr::fetchLastUsedDate(task.installLocation, task.uninstallString);
                 if (!date.empty()) {
-                    if (m_dateFetchEpoch != epoch) break;
-                    std::wstring* pDate = new std::wstring(date);
-                    PostMessageW(hTabProg, WM_UPDATE_PROG_DATE, (WPARAM)progIdx, (LPARAM)pDate);
+                    if (m_dateFetchEpoch.load() != epoch) break;
+                    ProgDateResult* pRes = new ProgDateResult{ epoch, task.progIdx, std::move(date) };
+                    PostMessageW(hTabProg, WM_UPDATE_PROG_DATE, 0, (LPARAM)pRes);
                 }
             }
         }).detach();
