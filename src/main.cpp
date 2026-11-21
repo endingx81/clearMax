@@ -320,6 +320,16 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmd
                 LocalFree(argv);
                 return RegistryMgr::RunSafePurgeService();
             }
+            if (_wcsicmp(argv[i], L"--register") == 0 || _wcsicmp(argv[i], L"/register") == 0) {
+                RegistryMgr::setContextMenuEnabled(true);
+                LocalFree(argv);
+                return 0;
+            }
+            if (_wcsicmp(argv[i], L"--unregister") == 0 || _wcsicmp(argv[i], L"/unregister") == 0) {
+                RegistryMgr::setContextMenuEnabled(false);
+                LocalFree(argv);
+                return 0;
+            }
         }
     }
 
