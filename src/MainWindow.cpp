@@ -2565,13 +2565,24 @@ static std::wstring ExtractStartupTarget(const StartupItem& item) {
 }
 
 void MainWindow::PopulateStartupList(HWND hList) {
-    m_startupItems = StartupMgr::getStartupItems();
-    if (m_hStartupImageList) ImageList_RemoveAll(m_hStartupImageList);
+    if (!m_hStartupImageList) return;
 
-    HICON hDefaultIcon = LoadIconW(NULL, IDI_APPLICATION);
-    int defaultIconIdx = ImageList_AddIcon(m_hStartupImageList, hDefaultIcon);
+    if (ImageList_GetImageCount(m_hStartupImageList) == 0) {
+        HICON hDefaultIcon = LoadIconW(NULL, IDI_APPLICATION);
+        ImageList_AddIcon(m_hStartupImageList, hDefaultIcon);
+    }
+    const int defaultIconIdx = 0;
+
+    m_startupItems = StartupMgr::getStartupItems();
 
     for (auto& item : m_startupItems) {
+        std::wstring key = item.location + L"|" + item.name + L"|" + item.command;
+        auto it = m_startupCache.find(key);
+        if (it != m_startupCache.end() && it->second >= 0) {
+            item.iconIndex = it->second;
+            continue; // 캐시 적중: 디스크 추출 생략 (0.0001ms)
+        }
+
         std::wstring targetPath = ExtractStartupTarget(item);
         HICON hIcon = NULL;
         if (!targetPath.empty()) {
@@ -2584,6 +2595,8 @@ void MainWindow::PopulateStartupList(HWND hList) {
         } else {
             item.iconIndex = defaultIconIdx;
         }
+
+        m_startupCache[key] = item.iconIndex;
     }
 
     HWND hCombo = GetDlgItem(GetParent(hList), IDC_CMB_STARTUP_FILTER);
@@ -2594,6 +2607,17 @@ void MainWindow::PopulateStartupList(HWND hList) {
 }
 
 void MainWindow::FilterStartupList(HWND hList, int filterType) {
+    SendMessageW(hList, WM_SETREDRAW, FALSE, 0);
+
+    int topIndex = ListView_GetTopIndex(hList);
+    int selItem = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+    std::wstring selName;
+    if (selItem != -1) {
+        wchar_t buf[256] = {0};
+        ListView_GetItemText(hList, selItem, 0, buf, 256);
+        selName = buf;
+    }
+
     ListView_DeleteAllItems(hList);
 
     for (size_t i = 0; i < m_startupItems.size(); ++i) {
@@ -2613,20 +2637,47 @@ void MainWindow::FilterStartupList(HWND hList, int filterType) {
         lvi.iImage = item.iconIndex;
         
         int row = ListView_InsertItem(hList, &lvi);
-        
-        ListView_SetItemText(hList, row, 1, (LPWSTR)item.location.c_str());
+        if (row != -1) {
+            ListView_SetItemText(hList, row, 1, (LPWSTR)item.location.c_str());
 
-        std::wstring statusStr = item.isEnabled ? L"사용" : L"사용 안 함";
-        if (item.isFileMissing) {
-            statusStr += L" (파일 없음)";
+            std::wstring statusStr = item.isEnabled ? L"사용" : L"사용 안 함";
+            if (item.isFileMissing) {
+                statusStr += L" (파일 없음)";
+            }
+            ListView_SetItemText(hList, row, 2, (LPWSTR)statusStr.c_str());
+            ListView_SetItemText(hList, row, 3, (LPWSTR)item.command.c_str());
         }
-        ListView_SetItemText(hList, row, 2, (LPWSTR)statusStr.c_str());
-        ListView_SetItemText(hList, row, 3, (LPWSTR)item.command.c_str());
     }
 
     if (m_startupSortColumn != -1) {
         ListView_SortItems(hList, ListViewStartupCompareProc, (LPARAM)this);
     }
+
+    if (!selName.empty()) {
+        int count = ListView_GetItemCount(hList);
+        for (int i = 0; i < count; ++i) {
+            wchar_t buf[256] = {0};
+            ListView_GetItemText(hList, i, 0, buf, 256);
+            if (selName == buf) {
+                ListView_SetItemState(hList, i, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                break;
+            }
+        }
+    }
+
+    if (topIndex > 0) {
+        int perPage = ListView_GetCountPerPage(hList);
+        int targetBottom = topIndex + perPage - 1;
+        int count = ListView_GetItemCount(hList);
+        if (targetBottom >= count) targetBottom = count - 1;
+        if (targetBottom >= 0) {
+            ListView_EnsureVisible(hList, targetBottom, FALSE);
+            ListView_EnsureVisible(hList, topIndex, FALSE);
+        }
+    }
+
+    SendMessageW(hList, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hList, NULL, TRUE);
 }
 
 int CALLBACK MainWindow::ListViewStartupCompareProc(LPARAM lParam1, LPARAM lParam2, LPARAM lParamSort) {

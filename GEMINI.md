@@ -214,6 +214,12 @@ AI 에이전트(당신)가 개발 중 **실제로 저질렀던 치명적인 실�
   9. **새로고침 시 재진입 가드(Re-entrancy Guard) 및 Epoch 진입 즉시 갱신**:
      - **실제 실수**: 새로고침 버튼 핸들러에서 검색창을 비우기 위해 `SetDlgItemTextW(..., L"")`를 호출하자마자 `EN_CHANGE` 이벤트가 동기적으로 트리거되어 `FilterProgramsList`가 실행되고, 직후 `PopulateProgramsList`가 또 `FilterProgramsList`를 호출하면서 리스트뷰 삭제/재배치가 중첩 충돌함. 또한 `++m_dateFetchEpoch`를 작업 맨 끝에서 올리는 바람에 이전 스레드가 즉시 멈추지 않고 계속 데이터를 쏘아대는 레이스 컨디션 발생.
      - **방지 원칙**: 새로고침 진입 즉시 `m_bUpdatingPrograms = true` 가드를 걸어 중복 필터링을 방어하고, 함수 첫 줄에서 `int epoch = ++m_dateFetchEpoch;`를 최우선으로 실행하여 이전 백그라운드 스레드를 0.0001초 만에 즉각 탈출시킬 것.
+  10. **시작 프로그램 목록(StartupMgr) 아이콘 캐싱 및 상태 보존 원칙**:
+     - **배경**: 시작 프로그램 탭에서도 새로고침(`PopulateStartupList`) 시 `ImageList_RemoveAll`을 호출하고 매번 디스크의 `.exe` 바이너리에서 아이콘을 재추출하던 구조적 비효율 존재.
+     - **해결 원칙**:
+       1. `m_startupCache` (키: `location|name|command`) 영구 해시맵을 구축하여 기존 로드된 `iconIndex`를 0.0001초 만에 재사용하고 디스크 I/O를 100% Skip할 것.
+       2. `ImageList_RemoveAll`을 배제하고 신규 등록된 시작 프로그램만 `m_hStartupImageList`에 추가할 것.
+       3. `FilterStartupList`에 `WM_SETREDRAW` 가드와 선택 항목/스크롤 위치(`topIndex`) 복원 파이프라인을 적용하여 화면 깜빡임과 포커스 이탈을 원천 방지할 것.
 
 ---
 

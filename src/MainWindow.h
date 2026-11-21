@@ -68,6 +68,7 @@ private:
     std::vector<StartupItem> m_startupItems;
     HIMAGELIST m_hProgImageList;
     HIMAGELIST m_hStartupImageList;
+    std::unordered_map<std::wstring, int> m_startupCache;
 
     std::unique_ptr<SpaceAnalyzer> m_spaceAnalyzer;
     SpaceAnalyzer::SortMode m_analyzerSortMode = SpaceAnalyzer::SortMode::SizeDesc;
