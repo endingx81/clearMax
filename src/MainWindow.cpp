@@ -1073,7 +1073,7 @@ void MainWindow::FilterProgramsList(HWND hList, const std::wstring& filter) {
     }
 
     SendMessageW(hList, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(hList, NULL, TRUE);
+    InvalidateRect(hList, NULL, FALSE);
 }
 
 void MainWindow::ShowProgramsContextMenu(HWND hWnd, POINT pt) {
@@ -2315,7 +2315,7 @@ INT_PTR CALLBACK MainWindow::StartupDlgProc(HWND hWnd, UINT message, WPARAM wPar
         SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)pThis);
         
         HWND hList = GetDlgItem(hWnd, IDC_LIST_STARTUP);
-        ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+        ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
         ListView_SetImageList(hList, pThis->m_hStartupImageList, LVSIL_SMALL);
         
         LVCOLUMNW lvc = { 0 };
@@ -2677,7 +2677,7 @@ void MainWindow::FilterStartupList(HWND hList, int filterType) {
     }
 
     SendMessageW(hList, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(hList, NULL, TRUE);
+    InvalidateRect(hList, NULL, FALSE);
 }
 
 int CALLBACK MainWindow::ListViewStartupCompareProc(LPARAM lParam1, LPARAM lParam2, LPARAM lParamSort) {

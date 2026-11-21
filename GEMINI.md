@@ -220,6 +220,11 @@ AI 에이전트(당신)가 개발 중 **실제로 저질렀던 치명적인 실�
        1. `m_startupCache` (키: `location|name|command`) 영구 해시맵을 구축하여 기존 로드된 `iconIndex`를 0.0001초 만에 재사용하고 디스크 I/O를 100% Skip할 것.
        2. `ImageList_RemoveAll`을 배제하고 신규 등록된 시작 프로그램만 `m_hStartupImageList`에 추가할 것.
        3. `FilterStartupList`에 `WM_SETREDRAW` 가드와 선택 항목/스크롤 위치(`topIndex`) 복원 파이프라인을 적용하여 화면 깜빡임과 포커스 이탈을 원천 방지할 것.
+  11. **리스트뷰 새로고침 시 깜빡임(Flicker) 완전 박멸 원칙 (더블 버퍼링 & 배경 소거 금지)**:
+     - **실제 실수**: 프로그램 관리 탭에는 `LVS_EX_DOUBLEBUFFER`가 걸려있어 부드럽게 갱신되었으나, 시작 프로그램 탭 리스트뷰(`IDC_LIST_STARTUP`)에는 더블 버퍼링 스타일이 누락되어 있고 `InvalidateRect(..., TRUE)`로 배경을 흰색으로 강제 소거하면서 새로고침 시 화면이 번쩍거리는 플래시(깜빡임) 발생.
+     - **방지 원칙**:
+       1. 모든 Win32 리스트뷰(`SysListView32`) 초기화 시에는 **`LVS_EX_DOUBLEBUFFER` 확장 스타일을 무조건 기본 적용**할 것.
+       2. 리스트뷰 갱신 후 화면 무효화 시 **`InvalidateRect(hList, NULL, FALSE)` (bErase=FALSE)**를 지정하여 배경 재소거로 인한 깜빡임을 원천 차단할 것.
 
 ---
 
